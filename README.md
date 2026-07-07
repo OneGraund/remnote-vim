@@ -54,6 +54,8 @@ text via RemNote's own read-only data API, then cleans up after itself.
 
 `e2e/ctl.mjs` is a small manual CDP remote (`node e2e/ctl.mjs shot out.png`,
 `… eval '<js>'`, `… key 'j j x'`) handy for poking at the running app.
+`e2e/sdk-repl.mjs` runs async JS inside the plugin sandbox with the live
+adapter (`a`) and SDK (`p`) in scope — see DEVELOPMENT.md §7.
 
 ## Build a distributable zip
 

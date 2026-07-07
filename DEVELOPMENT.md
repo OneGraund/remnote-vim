@@ -15,6 +15,121 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-07 evening — HANDOFF: live e2e verified, native rem-clipboard landed
+
+Read this first — it supersedes the "BLOCKED" status of the entry below.
+Session ended mid-verification (account switch); here is the exact state.
+
+**Live environment (was running at handoff, easy to recreate):**
+
+- e2e RemNote on CDP **9223** via `./e2e/launch.sh` (run in background; app up
+  in ~30 s). Login **persists** in the scratch HOME (`/tmp/remnote-vim-e2e-home`,
+  `e2e/.env` account, knowledge base "VIM") — it boots straight into the
+  Daily Document. Webpack dev server on 8080 (`npm run dev`) serves the
+  plugin; RemNote side is already configured to develop-from-localhost.
+- **The plugin iframe does NOT pick up rebuilds**: webpack rebuilds, but the
+  widget keeps running old code (no live-reload handshake), and CDP
+  `Page.reload` on the iframe target reloads it *without* re-activating the
+  plugin. **Reloading the MAIN window kills the whole app** (RemNote treats
+  main-frame reload as exit — verified twice). The only reliable way to load
+  a new bundle: `pkill -f 'remote-debugging-port=9223'; ./e2e/launch.sh`.
+- Suite invocations that pass:
+  `REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 npm run e2e` and
+  `REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 node e2e/stress.mjs`.
+  The raised `VIM_E2E_SETTLE` matters: with the default 900 ms the *first*
+  insert after plugin activation still races the key-release and drops the
+  first typed char (reproduced: 12/16; with 1600 ms: 16/16).
+
+**⚠ ONE ITEM IN FLIGHT — finish this first:** `indentSelection` in
+`src/adapter/adapter.ts` was rewritten this session (derive the indent
+destination once per same-parent run instead of re-querying
+`positionAmongstSiblings` between `setParent` calls — the re-query races
+RemNote's data layer and can return the unit itself as its own "previous
+sibling", silently skipping it; reproduced twice as `run.mjs` "v j . indent"
+failing on the *pasted-then-indented* beta bullet while stress phase 4
+passes). The rewrite is `tsc`-clean and 115/115 on unit tests but **has NOT
+been live-verified**. Next action: restart the e2e app (see above) so the
+plugin loads the current bundle, then run the smoke suite twice — expect
+16/16 both times. If beta still ends up at doc level, instrument
+`indentSelection` via `e2e/sdk-repl.mjs` (below).
+
+**Landed this session — whole-rem ops now hit the OS clipboard natively:**
+
+`dd`, `yy`, visual-line `d`/`y` previously wrote the clipboard via
+`writeClipboard()` from the sandbox — which **can never work** (see
+discoveries). They now go through `nativeClipboardRems()` (adapter):
+`editor.selectRem(ids)` → `editor.copy()` → pane-refocus caret recovery,
+with `cutRems()` = that + the proven `removeRems()` loop for the delete
+family. All verified live: `yy` → `- line` on the OS clipboard
+(`clip:native` badge), `v j y` → both bullets, `dd`+`p` round-trip intact,
+and typing works immediately after a yank (caret survives). Unit tests
+needed no changes (harness semantics already said "clipboard gets the
+text" — now it's actually true live).
+
+**Discoveries this session (all probed live on RemNote 1.26.30, §9 updated):**
+
+1. **Sandbox clipboard writes are dead, always**: in the plugin iframe
+   `navigator.clipboard.writeText` rejects (`Document is not focused`), the
+   `clipboard-write` permission is hard-**denied**, and `execCommand('copy')`
+   returns false (no transient user activation ever reaches the iframe —
+   stolen keys arrive via async postMessage). `writeClipboard()`'s first two
+   tiers are dead weight live; only host-side native paths work. The
+   charwise `copyText` action still tries `writeClipboard` first — harmless
+   (its select+cut+reinsert fallback does the real work) but a candidate for
+   simplification.
+2. **`editor.copy()` on a Rem selection works** and writes RemNote's own
+   serialization (text/plain `- bullet` lines + rich text/html) — this is
+   the only multi-rem clipboard path available to the sandbox.
+3. **`editor.cut()` on a Rem selection writes EMPTY html** to the clipboard
+   (it serializes *after* removal, apparently). Never use it for rem cuts;
+   copy-then-remove instead. (Text-range `cut()` via `selectText` is fine —
+   the charwise paths keep using it.)
+4. **The `selectRem` "one-way door" has an escape hatch**:
+   `window.getFocusedPaneId()` before + `window.setFocusedPaneId(paneId)`
+   after clears the Rem selection and restores the text caret to its exact
+   pre-selection rem AND column (probed with a marker insert). Everything
+   else fails: `collapseSelection`, `moveCaret(Vertical)`, `selectText`,
+   `selectRem([])`, `insertPlainText` over the selection, even a real
+   Escape (we steal it) — only pane refocus (or a real ArrowDown/click, which
+   the plugin can't synthesize) recovers. §9 rewritten accordingly.
+5. **RemNote can boot with `pointer-events-none` stuck on
+   `.rn-editor-container`** (its suppress-mouse-while-typing state; a real
+   pointer never entering the window leaves it set). Symptom: every CDP
+   `mouse.click` falls through to `<html>`, `elementFromPoint` returns the
+   root, clicks focus nothing — looks exactly like a zoom/coordinate bug
+   (it isn't; dpr=1). Both suites now strip the class once at startup;
+   `sdk-repl.mjs`/manual sessions may need
+   `document.querySelector('.rn-editor-container').classList.remove('pointer-events-none')`.
+
+**New tool — `e2e/sdk-repl.mjs`**: run arbitrary async JS *inside the
+sandboxed plugin iframe* with `a` = the live `VimAdapter` and `p` = the
+`RNPlugin` (SDK): `node e2e/sdk-repl.mjs 'return await
+p.focus.getFocusedRem()'`. Works because the adapter now exposes
+`globalThis.__vimAdapter` (constructor; sandbox-scope only). This is how all
+of the above was probed — vastly faster than rebuild-and-keypress loops.
+Documented in §7.
+
+**Files touched this session** (committed together with this log):
+`src/adapter/adapter.ts` (nativeClipboardRems, cutRems, deleteRem/yankRem/
+deleteRemSelection/yankRemSelection rewires, yankRemSelection now
+invalidates the model, `__vimAdapter` hook, indentSelection rewrite),
+`e2e/run.mjs` + `e2e/stress.mjs` (pointer-events strip; stress phase 5
+updated to the new v-cycle: `vv`/`vvd` where it meant visual-line),
+`e2e/launch.sh` (extracted-AppRun path + APPDIR export, deep-link warning),
+`e2e/sdk-repl.mjs` (new).
+
+**Still ☐ after the indent verification** (from the batch below):
+
+- ☐ `o` on a ToDo bullet — verify live it creates a *sibling* (build one
+  with `:todo`, press `o`, check `getParentRem()` via sdk-repl).
+- ☐ `:todo` on a multi-bullet visual selection — verify live.
+- ☐ `Ctrl-W h/l` with a real split pane — verify live.
+- ☐ Charwise visual (`v` + `h/l/e` …) selection rendering — eyeball via
+  screenshot that the native text selection tracks.
+- ☐ Consider simplifying `copyText`/`writeClipboard` given discovery #1
+  (drop the dead tiers, or keep as defensive fallback — decide, then align
+  the §0.5 wording).
+
 ### 2026-07-07 — user-reported bug batch (in progress, Claude)
 
 **Context discovered first:** `dist/` was built 2026-07-06 20:16 but
@@ -50,7 +165,8 @@ Plan (☑ done / ☐ pending), driven by the user's report:
   emits new `copyText` action (async clipboard API → execCommand →
   select+cut+reinsert fallback); line register still flattens to
   tab-indented text via `writeClipboard`. Badge shows `clip:` status.
-  **Needs live verification** of which fallback tier actually fires.
+  **Update (evening entry above): verified live — the sandbox tiers can
+  never fire; whole-rem ops now use `nativeClipboardRems` instead.**
 - ☑ **Normal-mode cursor visibility** — cursorline: `[data-rem-id]
   :focus-within` row tint + colored left bar via registerCSS.
 - ☑ **Visual-mode `/` command palette** — `;`/`/`/`:` from visual/visual-line
@@ -62,18 +178,11 @@ Plan (☑ done / ☐ pending), driven by the user's report:
   against a todo bullet.
 - ☑ tests updated + extended (jumplist, clipboard, visual command line,
   charwise g-chords, I-beam `e`): 115/115 green; `tsc` clean
-- ☐ live e2e pass — **BLOCKED 2026-07-07**: the `launch.sh` instance
-  self-exits ~9 s after start while the production RemNote is running
-  (fixed-port collisions: inspector 9229, SQLite 9320 → `EADDRINUSE`; the app
-  then handles `{type:'exit'}`). Yesterday's e2e sessions ran without the
-  production app open. To verify: close the everyday RemNote, run
-  `./e2e/launch.sh`, sign in with the `e2e/.env` account, load the plugin
-  from `http://localhost:8080/` (a dev server serving today's build may
-  already be running), open the Daily Document, then
-  `REMNOTE_CDP_PORT=9223 npm run e2e` and `REMNOTE_CDP_PORT=9223 node
-  e2e/stress.mjs`. Manual probes still wanted: which clipboard tier fires
-  (badge `clip:` field), `o` on a ToDo bullet (sibling, not child), Ctrl-W
-  with a split pane, `:todo` on a multi-bullet selection.
+- ☑ live e2e pass — **UNBLOCKED, see the evening entry above**: environment
+  works (launch.sh + e2e/.env login persisted), smoke suite 16/16 with
+  `VIM_E2E_SETTLE=1600` (then 15/16 ×2 on an indent data race — fix in
+  flight, see above), stress 59/59, clipboard tiers verified live. Remaining
+  manual probes are re-listed in the evening entry's ☐ section.
 - ☑ docs: VIM_STATUS.md was deleted from the working tree mid-session (not
   by Claude — swept into commit daaa04e by `git add -A`; full text
   recoverable from commit 122d18e). Its live content now lives here: feature
@@ -116,9 +225,14 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   cut, `y` yank, `p` paste, `.`/`,` indent/outdent; `;` or `/` opens the
   command line over the selection; registers carry whole subtrees; caret
   walks to a survivor before any deletion.
-- **System clipboard** — deletes route through native `editor.cut()`
-  (host-side, sandbox-proof); charwise yanks try clipboard API → execCommand
-  → select+cut+reinsert; line registers flatten to tab-indented text.
+- **System clipboard** — charwise deletes route through native text-range
+  `editor.cut()`; charwise yanks through `copyText` (live path is the
+  select+cut+reinsert fallback — direct sandbox writes are permission-denied,
+  see §9); whole-rem ops (`dd`/`yy`/visual-line `d`/`y`) through
+  `nativeClipboardRems` (`selectRem` + `editor.copy()` + pane-refocus caret
+  recovery) — clipboard gets RemNote's own `- bullet` serialization. Badge
+  `clip:` field shows which path fired (`clip:native`/`clip:api`/
+  `clip:exec`/`clip:FAIL`).
 - **Jumplist** — `Ctrl-O`/`Ctrl-I` over `gg`/`ge`/`:e` jumps (vim
   truncate-forward semantics).
 - **Panes** — `Ctrl-W` then `h`/`l`/`w`.
@@ -489,6 +603,25 @@ Handy for reproducing a live bug interactively before writing it into
 `stress.mjs`/`tree.mjs` as a regression check, or for reading the debug badge
 live (`eval "getComputedStyle(document.body,'::before').content"`).
 
+### SDK REPL — `e2e/sdk-repl.mjs`
+
+Runs an async JS body *inside the sandboxed plugin iframe*, with `a` bound to
+the live `VimAdapter` instance and `p` to the `RNPlugin` (the adapter exposes
+itself as `globalThis.__vimAdapter` for exactly this):
+
+```bash
+node e2e/sdk-repl.mjs 'const f = await p.focus.getFocusedRem(); return f?.text;'
+node e2e/sdk-repl.mjs 'return (await p.editor.getSelection())?.type ?? "none";'
+```
+
+This is the fastest way to answer "what does SDK call X actually do live?" —
+no rebuild, no keypress choreography. All of the §9 selection/clipboard
+findings were probed this way. Caveats: the app must be running with the dev
+plugin loaded (it attaches to the `localhost:8080` iframe CDP target), and
+state you mutate is real — clean up after probes. Remember the app restart
+requirement when you edit adapter code (§0 evening entry): the iframe does
+not pick up rebuilds; `pkill -f 'remote-debugging-port=9223'` and relaunch.
+
 ## 8. Debugging checklist
 
 - **Key does nothing live, but the unit test passes:** check `keymap.ts` —
@@ -539,8 +672,34 @@ against RemNote 1.26.30):
 - **`requestNative: true` currently does nothing** (manifest.json has it set
   to `false`; `domCaret.ts` exists for if/when RemNote unblocks it, but
   `hostDocument()` will keep returning `null` in the sandbox until then).
-- **`editor.selectRem` is a one-way door** — it blurs the caret with no way
-  back. Never call it from new code; use the CSS-tint trail approach instead.
+- **Direct clipboard writes from the sandbox NEVER work** (probed live):
+  `navigator.clipboard.writeText` rejects with "Document is not focused",
+  the `clipboard-write` permission is hard-denied for the plugin iframe, and
+  `execCommand('copy')` returns false (no user activation ever reaches the
+  iframe — stolen keys arrive by async postMessage). Every clipboard write
+  must ride a native editor operation in the host: text-range
+  `selectText`+`cut()` (charwise) or `selectRem`+`copy()` (whole-rem).
+- **`editor.cut()` on a Rem selection writes EMPTY html to the clipboard**
+  (it serializes after removal). For rem cuts: `copy()` first, then remove
+  via the SDK (`cutRems` in the adapter). Text-range `cut()` is unaffected.
+- **`editor.selectRem` blurs the caret — recover it with a pane refocus.**
+  The old "one-way door, never call it" rule is obsolete: capture
+  `window.getFocusedPaneId()` before selecting, call
+  `window.setFocusedPaneId(paneId)` after, and the Rem selection clears with
+  the caret restored to its exact pre-selection rem AND column (verified
+  with a marker insert). Nothing else recovers it: `collapseSelection`,
+  `moveCaret`/`moveCaretVertical`, `selectText`, `selectRem([])`,
+  `insertPlainText`, and even a real Escape (stolen by us) all leave the
+  selection stuck — and while it's stuck, typed keys bypass the steal and
+  open RemNote's selection-actions popup. Use `nativeClipboardRems` as the
+  reference implementation; visual-line mode still uses the CSS-tint trail
+  (a persistent native selection would keep the caret dead between keys).
+- **RemNote can boot with `pointer-events-none` stuck on
+  `.rn-editor-container`** (suppress-mouse-while-typing state that never
+  clears when no real pointer enters the window — an e2e/CDP hazard more
+  than a user-facing one). All CDP clicks then fall through to `<html>` and
+  focus nothing. The e2e suites strip the class at startup; do the same in
+  manual sessions if clicks mysteriously no-op.
 
 ## 10. Build & release
 

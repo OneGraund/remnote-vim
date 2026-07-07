@@ -39,6 +39,13 @@ async function findPage() {
 const page = await findPage();
 if (!page) { console.error('✗ RemNote app page not found.'); process.exit(2); }
 
+// RemNote can boot with a stuck `pointer-events-none` on the editor (its
+// suppress-mouse-while-typing state never clears if no real pointer ever
+// enters the window) — every mouse.click would then fall through to <html>
+// and silently focus nothing. Strip it once up front.
+await page.evaluate(() =>
+  document.querySelector('.rn-editor-container')?.classList.remove('pointer-events-none'));
+
 const wait = (ms) => page.waitForTimeout(ms);
 const dbg = () => page.evaluate(() => getComputedStyle(document.body, '::before').content.replace(/\\?"/g, ''));
 const badge = () => page.evaluate(() => getComputedStyle(document.body, '::after').content.replace(/\\?"/g, ''));

@@ -88,7 +88,12 @@ export class VimAdapter {
   private jumps: string[] = [];
   private jumpPos = 0;
 
-  constructor(private plugin: RNPlugin) {}
+  constructor(private plugin: RNPlugin) {
+    // Dev/e2e introspection hook: lets the CDP harness call SDK methods
+    // directly inside the sandbox (e.g. probing editor selection behavior).
+    // Sandboxed iframe scope only — invisible to the host page.
+    (globalThis as { __vimAdapter?: unknown }).__vimAdapter = this;
+  }
 
   get mode(): Mode {
     return this.state.mode;
@@ -287,12 +292,13 @@ export class VimAdapter {
       case 'jump': // the caret lands in a different rem
       case 'focusPane':
       case 'vExtend': // the selection head physically moves the caret
+      case 'yankRemSelection': // native copy parks the caret on the first line
         this.invalidateModel();
         break;
       case 'mode':
       case 'newBullet':
       case 'vStart':
-      case 'yankRemSelection':
+      case 'yankRem': // exec restores the caret column itself after native copy
       case 'copyText':
         // newBullet installs its own model in exec; copyText's fallback path
         // maintains the model caret itself in exec; the others don't change
@@ -394,17 +400,21 @@ export class VimAdapter {
         for (const r of rems) {
           this.lineRegister.push(await this.captureSubtree(r));
         }
-        await this.copyRegisterToClipboard();
-        await this.removeRems(rems);
+        await this.cutRems(rems);
         this.lastCaret = 0;
         break;
       }
 
       case 'yankRem': {
         const rems = await this.focusedPlusFollowing(a.count);
+        if (rems.length === 0) break;
         this.lineRegister = [];
         for (const r of rems) this.lineRegister.push(await this.captureSubtree(r));
-        await this.copyRegisterToClipboard();
+        // Pane refocus inside nativeClipboardRems puts the caret back at the
+        // exact rem+column it had, so the local model stays valid as-is.
+        if (!(await this.nativeClipboardRems(rems.map((r) => r._id)))) {
+          await this.copyRegisterToClipboard();
+        }
         break;
       }
 
@@ -546,8 +556,7 @@ export class VimAdapter {
         if (rems.length === 0) break;
         this.lineRegister = [];
         for (const r of rems) this.lineRegister.push(await this.captureSubtree(r));
-        await this.copyRegisterToClipboard();
-        await this.removeRems(rems);
+        await this.cutRems(rems);
         this.clearVTrail();
         this.invalidateModel();
         break;
@@ -555,9 +564,14 @@ export class VimAdapter {
 
       case 'yankRemSelection': {
         const rems = await this.vUnits();
+        if (rems.length === 0) break;
         this.lineRegister = [];
         for (const r of rems) this.lineRegister.push(await this.captureSubtree(r));
-        await this.copyRegisterToClipboard();
+        if (!(await this.nativeClipboardRems(rems.map((r) => r._id)))) {
+          await this.copyRegisterToClipboard();
+        }
+        // vim leaves the cursor on the first yanked line
+        await this.walkCaretTo(rems[0]._id, -1);
         this.clearVTrail();
         break;
       }
@@ -570,16 +584,30 @@ export class VimAdapter {
         // caret; park the caret on a stable neighbor first.
         await this.walkCaretOut(new Set(rems.map((r) => r._id)));
         if (a.t === 'indentSelection') {
-          // each selection unit tucks under its previous sibling (vim >),
-          // top-down so consecutive siblings stack in original order
+          // vim >: a run of units sharing a parent all tuck under the sibling
+          // just above the run's FIRST unit, keeping order. The destination is
+          // derived once per run — re-querying positions between setParent
+          // calls races RemNote's data layer (a stale read can return the
+          // unit itself as its own "previous sibling" and silently no-op).
+          let runParent: string | null | undefined;
+          let dest: (typeof rems)[number] | null = null;
+          let at = 0;
           for (const r of rems) {
             const parent = await r.getParentRem();
-            const pos = await r.positionAmongstSiblings();
-            if (!parent || pos == null || pos === 0) continue;
-            const siblings = await parent.getChildrenRem();
-            const prev = siblings[pos - 1];
-            if (!prev) continue;
-            await r.setParent(prev, (prev.children ?? []).length);
+            const pid = parent?._id ?? null;
+            if (pid !== runParent || !dest) {
+              runParent = pid;
+              dest = null;
+              const pos = await r.positionAmongstSiblings();
+              if (!parent || pos == null || pos === 0) continue;
+              const siblings = await parent.getChildrenRem();
+              const prev = siblings[pos - 1];
+              if (!prev || prev._id === r._id) continue;
+              dest = prev;
+              at = (prev.children ?? []).length;
+            }
+            await r.setParent(dest, at);
+            at += 1;
           }
         } else {
           // each unit moves to just after its parent; bottom-up keeps the
@@ -886,6 +914,52 @@ export class VimAdapter {
     const text = this.registerToText(this.lineRegister).replace(/\n$/, '');
     if (!text) return;
     await this.writeClipboard(text);
+  }
+
+  /**
+   * Whole-rem copy through RemNote's NATIVE clipboard. The sandbox can never
+   * write the OS clipboard itself (clipboard-write is permission-denied for
+   * the unfocused plugin iframe — §9), so a real Rem selection plus
+   * `editor.copy()` is the only host-side path that works. `selectRem` blurs
+   * the text caret, but re-focusing the pane clears the Rem selection and
+   * restores the caret to its exact pre-selection rem AND column (verified
+   * live) — this is the escape hatch §9's "one-way door" note was missing.
+   * Note: `editor.cut()` on a Rem selection writes EMPTY html to the
+   * clipboard (verified live), so deletion is always copy + SDK removal.
+   */
+  private async nativeClipboardRems(ids: string[]): Promise<boolean> {
+    const { editor, window } = this.plugin;
+    try {
+      const paneId = await window.getFocusedPaneId();
+      await editor.selectRem(ids);
+      const kind = await editor.copy();
+      await window.setFocusedPaneId(paneId);
+      this.dbgClip = kind ? 'clip:native' : 'clip:FAIL';
+      return Boolean(kind);
+    } catch {
+      this.dbgClip = 'clip:FAIL';
+      return false;
+    }
+  }
+
+  /**
+   * Remove whole rems with vim register semantics: OS clipboard first (native
+   * copy of the full selection), then the proven SDK removal loop — which
+   * needs the caret alive to park it on a survivor, hence copy-then-remove.
+   */
+  private async cutRems(
+    rems: {
+      _id: string;
+      getParentRem: () => Promise<unknown>;
+      positionAmongstSiblings: () => Promise<number | undefined>;
+      remove: () => Promise<void>;
+      setText?: (t: RichTextInterface) => Promise<void>;
+    }[]
+  ) {
+    if (!(await this.nativeClipboardRems(rems.map((r) => r._id)))) {
+      await this.copyRegisterToClipboard();
+    }
+    await this.removeRems(rems);
   }
 
   // ------------------------------------------------- jumplist

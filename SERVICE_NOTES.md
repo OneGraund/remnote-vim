@@ -24,7 +24,7 @@ feature.
 | Shift-blindness → synonym table (`gl`=`$`, `ge`=`G`, `vv`=`V`) | A capture-phase `keydown` listener in the host page sees `key`, `shiftKey`, `ctrlKey` exactly. Real `$ ^ V G A O ~ : > <` become bindable; the synonym table becomes an optional fallback. |
 | Collapsed caret unreadable → column desync after mouse clicks | Host-page `getSelection()` reads the caret directly; push `{caret}` events to the plugin on every selectionchange. The model never desyncs again. |
 | No view scrolling → Ctrl-E/Ctrl-Y removed | `scroller.scrollBy(0, dy)` on the editor scroll container. True vim scroll (view moves, cursor stays). |
-| Clipboard writes may be blocked in the unfocused iframe | The service process writes the OS clipboard itself (`wl-copy` on this machine, or CDP `Browser.setPermission` + host-page `navigator.clipboard`). Deterministic, no fallback tiers. |
+| Clipboard writes may be blocked in the unfocused iframe | The service process writes the OS clipboard itself (`wl-copy` on this machine, or CDP `Browser.setPermission` + host-page `navigator.clipboard`). Deterministic, no fallback tiers. *Update 2026-07-07: mostly solved in-sandbox — whole-rem yanks now ride `selectRem`+`editor.copy()` with pane-refocus caret recovery (DEVELOPMENT.md §9), so the daemon's clipboard value shrinks to exotic cases (yank without any native op, custom formats).* |
 | `/` opens RemNote's own slash menu only for the focused bullet | The service can synthesize real key events (`Input.dispatchKeyEvent`) — or the plugin keeps its own `:`-command palette and the service just supplies real keys. |
 
 ## Architecture sketch (option A — recommended shape *if* this is ever built)

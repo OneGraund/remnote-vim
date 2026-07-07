@@ -69,6 +69,11 @@ const DOC_ID = await page.evaluate(() => location.href.match(/-([A-Za-z0-9]+)$/)
 if (!DOC_ID) { console.error("✗ open today's Daily Document first"); process.exit(2); }
 console.log('· stress test scoped to daily doc', DOC_ID);
 
+// Strip RemNote's stuck `pointer-events-none` typing-suppression state — see
+// the matching note in run.mjs; without this every mouse.click can no-op.
+await page.evaluate(() =>
+  document.querySelector('.rn-editor-container')?.classList.remove('pointer-events-none'));
+
 async function scopedBullets() {
   return page.evaluate((docId) => {
     const out = [];
@@ -219,10 +224,10 @@ checkEq('m2 back at top', (await parentOf('m2')) === (await idOf('m1')), false);
 
 console.log('· phase 5: subtree cut/paste (parent with child)');
 await clickBullet('m2');
-await step('select m2', 'v');
+await step('select m2 (vv = V-line)', 'vv');
 await step('indent m2 under m1', '.');
 await clickBullet('m1');
-await step('cut m1 with its child', 'vd');
+await step('cut m1 with its child', 'vvd');
 checkEq('m1+child gone', (await texts()).includes('m2'), false);
 await step('paste subtree back', 'p');
 checkEq('m1 restored', (await texts()).includes('m1'), true);
