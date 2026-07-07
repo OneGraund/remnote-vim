@@ -129,6 +129,7 @@ function VimHelp() {
         <div className="modes">
           <span className="modeChip" style={{ background: '#7c3aed' }}>NORMAL</span>
           <span className="modeChip" style={{ background: '#059669' }}>INSERT</span>
+          <span className="modeChip" style={{ background: '#d97706' }}>VISUAL</span>
           <span className="modeChip" style={{ background: '#d97706' }}>V-LINE</span>
           <span className="modeChip" style={{ background: '#0ea5e9' }}>COMMAND</span>
         </div>
@@ -158,14 +159,15 @@ function VimHelp() {
             <Row keys={['g', 'g']} desc="top of document" />
             <Row keys={['g', 'e']} desc="bottom of document  (vim: G)" />
             <Row keys={['f', '·']} desc="jump onto next ‘·’ in the line" />
-            <Row keys={[';']} desc="repeat the last f jump" />
+            <Row keys={[',']} desc="repeat the last f jump (backwards)" />
           </Section>
 
-          <Section title="Scroll">
+          <Section title="Scroll & jumps">
             <Row keys={['Ctrl-d']} desc="half page down" />
             <Row keys={['Ctrl-u']} desc="half page up" />
-            <Row keys={['Ctrl-e']} desc="one bullet down" />
-            <Row keys={['Ctrl-y']} desc="one bullet up" />
+            <Row keys={['Ctrl-o']} desc="back to before the last gg/ge/:e jump" />
+            <Row keys={['Ctrl-i']} desc="forward again" />
+            <Row keys={['Ctrl-w', 'h/l']} desc="focus previous / next pane" />
           </Section>
         </div>
 
@@ -184,19 +186,26 @@ function VimHelp() {
             <Row keys={['Ctrl-r']} desc="redo" />
           </Section>
 
-          <Section title="Select bullets (visual line)">
-            <Row keys={['v']} desc="start selecting (current bullet)" />
-            <Row keys={['j', '/', 'k']} desc="grow / shrink the selection" />
-            <Row keys={['d']} desc="cut the selected bullets" />
-            <Row keys={['y']} desc="copy them" />
-            <Row keys={['p']} desc="paste them back" />
-            <Row keys={['.']} desc="indent selection  (vim: >)" />
-            <Row keys={[',']} desc="outdent selection  (vim: <)" />
+          <Section title="Select (visual)">
+            <Row keys={['v']} desc="select text in the bullet (h/l/w/b/e grow it)" />
+            <Row keys={['v', 'v']} desc="select whole bullets  (vim: V)" />
+            <Row keys={['v', 'j/k']} desc="j/k also switch to whole bullets" />
+            <Row keys={['v', 'g', 'g']} desc="select up to the top of the doc" />
+            <Row keys={['v', 'g', 'e']} desc="select down to the bottom" />
+            <Row keys={['d']} desc="cut the selection" />
+            <Row keys={['y']} desc="copy it (also to the clipboard)" />
+            <Row keys={['p']} desc="paste" />
+            <Row keys={['.']} desc="indent selected bullets  (vim: >)" />
+            <Row keys={[',']} desc="outdent them  (vim: <)" />
+            <Row keys={[';']} desc="run a command on the selection ↓" />
             <Row keys={['Esc']} desc="cancel selection" />
           </Section>
 
           <Section title="Command line">
-            <Row keys={[';']} desc="open the : command line" />
+            <Row keys={[';']} desc="open the : command line (also /)" />
+            <Row keys={[':todo']} desc="make selected bullet(s) todos" />
+            <Row keys={[':done']} desc="check them off" />
+            <Row keys={[':untodo']} desc="remove the todo checkbox" />
             <Row keys={[':help']} desc="this window" />
             <Row keys={[':e name']} desc="search + open a page" />
             <Row keys={[':w', ':q']} desc="save / quit (RemNote autosaves)" />
@@ -207,11 +216,15 @@ function VimHelp() {
       <div className="note">
         <b>RemNote differences:</b> RemNote cannot see the Shift key, so
         CAPITAL commands act like their lowercase letter (<Key k="V" /> ={' '}
-        <Key k="v" />, which is why <Key k="v" /> selects whole bullets
-        directly). Use the <Key k="g" />
-        -shortcuts above where vim would use capitals or symbols. After
-        clicking with the mouse inside a line, press <Key k="0" /> or{' '}
+        <Key k="v" />, <Key k="$" /> arrives as <Key k="4" />). Use the{' '}
         <Key k="g" />
+        -shortcuts where vim uses capitals or symbols: <Key k="g" />
+        <Key k="l" /> = <Key k="$" /> (and <Key k="d" />
+        <Key k="g" />
+        <Key k="l" /> = <Key k="d" />
+        <Key k="$" />, delete to end of line). Deletes and yanks also land on
+        the system clipboard. After clicking with the mouse inside a line,
+        press <Key k="0" /> or <Key k="g" />
         <Key k="l" /> once to re-anchor the cursor.
       </div>
     </div>

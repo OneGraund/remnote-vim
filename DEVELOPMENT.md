@@ -1,11 +1,13 @@
 # Developer Guide
 
-This is the deep-dive companion to [README.md](./README.md) (quick start) and
-[VIM_STATUS.md](./VIM_STATUS.md) (feature/blocker tracking). Read this when
-you're about to write code: it explains *how the pieces fit together* and
-gives concrete recipes for extending or debugging the plugin. Written for
-both human contributors and future Claude Code instances picking this repo
-back up cold.
+This is the deep-dive companion to [README.md](./README.md) (quick start).
+Read this when you're about to write code: it explains *how the pieces fit
+together* and gives concrete recipes for extending or debugging the plugin.
+Written for both human contributors and future Claude Code instances picking
+this repo back up cold. It also carries the **work log (§0)**, the **feature
+status (§0.5)** and the **platform blockers (§9)** — the former VIM_STATUS.md
+was retired into those sections (its full text is in git history,
+commit 122d18e).
 
 > **Convention:** all in-flight plans and progress live in §0 (work log)
 > below — update it as you work so parallel contributors can see state at a
@@ -58,11 +60,25 @@ Plan (☑ done / ☐ pending), driven by the user's report:
 - ☐ **`o` on ToDo creating a child** — believed fixed by rebuild (old build
   had "child-aware o"; current `newBullet` is sibling-only). Verify live
   against a todo bullet.
-- ☐ update remaining tests, `npm test` green, `tsc`, `npm run build`
-- ☐ live e2e pass (launch.sh instance): run.mjs + stress.mjs + manual probes
-  (clipboard tier, todo-o, Ctrl-W panes need 2 panes)
-- ☐ docs: VIM_STATUS.md rewrite of changed sections, `:help` widget
-  (vim_help.tsx) new keys, README touch-up
+- ☑ tests updated + extended (jumplist, clipboard, visual command line,
+  charwise g-chords, I-beam `e`): 115/115 green; `tsc` clean
+- ☐ live e2e pass — **BLOCKED 2026-07-07**: the `launch.sh` instance
+  self-exits ~9 s after start while the production RemNote is running
+  (fixed-port collisions: inspector 9229, SQLite 9320 → `EADDRINUSE`; the app
+  then handles `{type:'exit'}`). Yesterday's e2e sessions ran without the
+  production app open. To verify: close the everyday RemNote, run
+  `./e2e/launch.sh`, sign in with the `e2e/.env` account, load the plugin
+  from `http://localhost:8080/` (a dev server serving today's build may
+  already be running), open the Daily Document, then
+  `REMNOTE_CDP_PORT=9223 npm run e2e` and `REMNOTE_CDP_PORT=9223 node
+  e2e/stress.mjs`. Manual probes still wanted: which clipboard tier fires
+  (badge `clip:` field), `o` on a ToDo bullet (sibling, not child), Ctrl-W
+  with a split pane, `:todo` on a multi-bullet selection.
+- ☑ docs: VIM_STATUS.md was deleted from the working tree mid-session (not
+  by Claude — swept into commit daaa04e by `git add -A`; full text
+  recoverable from commit 122d18e). Its live content now lives here: feature
+  status → §0.5, blockers → §9. `:help` widget (vim_help.tsx) updated with
+  the new keys; README links fixed.
 - ☐ SERVICE_NOTES.md — design-only exploration of a background companion
   service (CDP-based) to lift sandbox limits (shift-blindness, caret reads,
   true scrolling, clipboard). Explicitly NOT implemented.
@@ -76,6 +92,51 @@ Engine/adapter contract changes in this batch (for anyone rebasing):
 - New actions: `copyText {text,start?,end?}`, `jump {dir}`.
 - `handleCommand` leave-path now always emits `clearRemSelection`.
 - Harness mirrors all of the above + `clipboard`/`jumps` fields for tests.
+
+## 0.5 Feature status (what works live)
+
+Formerly VIM_STATUS.md; trimmed to what a contributor needs. Engine suite:
+**115/115** unit tests green (run `npm test` — don't trust this number, verify).
+
+Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
+
+- **Modes** — `i` insert / `Esc` normal / `v` charwise visual / `vv`
+  visual-line (`v`+`j/k` auto-upgrades) / `;` `/` `:` command line; mode badge
+  bottom-right; per-mode key stealing (insert releases everything but Esc).
+- **Motions** — `h l 0 w b e f<c> t<c>` `,`(reverse find repeat), counts;
+  g-chords for shift-blind capitals: `gl`=`$` `gh`=`^` `gg` `ge`=`G`.
+  `e` uses I-beam semantics (any forward progress counts), so `de` on
+  `a asdf` deletes just `a`.
+- **Operators** — `d c y` + motions/text objects (`dw de db dd df<c> dt<c>
+  diw daw`), `dgl`=`d$`, `dgh`=`d^`, `x X s S D C`, `r<c>`, backtick=`~`.
+- **Charwise visual** — `v` + `h/l/w/b/e/f/gl/gh` to shape; `d x c s y p o`;
+  `gg/ge/G` escalate to line-wise to the doc boundary.
+- **Visual-line (multi-bullet)** — extend with `j/k`/counts/`gg/ge`; `d`/`x`
+  cut, `y` yank, `p` paste, `.`/`,` indent/outdent; `;` or `/` opens the
+  command line over the selection; registers carry whole subtrees; caret
+  walks to a survivor before any deletion.
+- **System clipboard** — deletes route through native `editor.cut()`
+  (host-side, sandbox-proof); charwise yanks try clipboard API → execCommand
+  → select+cut+reinsert; line registers flatten to tab-indented text.
+- **Jumplist** — `Ctrl-O`/`Ctrl-I` over `gg`/`ge`/`:e` jumps (vim
+  truncate-forward semantics).
+- **Panes** — `Ctrl-W` then `h`/`l`/`w`.
+- **Scrolling** — `Ctrl-D`/`Ctrl-U` (caret page-moves; view follows).
+  `Ctrl-E`/`Ctrl-Y` deliberately unbound — no view-scroll API exists.
+- **Command line** — `:help` cheat sheet; `:todo`/`:done`/`:untodo` act on
+  the visual selection or focused bullet; `:e <name>` search+open (a jump);
+  `:w`/`:q` acknowledged (autosave).
+- **New bullets** — `o`/`go`(=`O`) always create a *sibling* (never a child).
+- **Cursor visibility** — cursorline row tint + colored left caret bar
+  outside insert mode.
+- **Undo/redo** — `u`/`Ctrl-R` delegate to RemNote's history.
+
+Known limitations (beyond §9 platform blockers):
+
+- Caret column desyncs after an intra-line mouse click (collapsed caret is
+  unreadable in the sandbox); re-anchor with `0`/`gl` or enter+leave insert.
+- Capitals act as their lowercase key (shift-blind stealing); use synonyms.
+- `j`/`k` move between Rems — a bullet is one line by construction.
 
 ## 1. Mental model
 
@@ -285,8 +346,8 @@ correctly, or forgot to invalidate it when it should have.
 
 RemNote's sandboxed plugin API cannot set an absolute collapsed caret
 position (`selectText` with a collapsed range, `collapseSelection`, and
-`moveCaret(_, MoveUnit.LINE)` are all no-ops in this sandbox — see blocker #1
-in VIM_STATUS.md). The one primitive that *does* move the real, visible
+`moveCaret(_, MoveUnit.LINE)` are all no-ops in this sandbox — see §9). The
+one primitive that *does* move the real, visible
 cursor is `editor.moveCaret(delta, MoveUnit.CHARACTER)` — a relative
 character offset from wherever the caret currently is. So every "set caret to
 X" in `exec()` (the `setCaret` case, `insertAt`, `setCaretAbs`) computes `to -
@@ -300,8 +361,8 @@ follow this exact pattern; don't reach for an absolute-set API — none exists.
 `applyMode(mode)` diffs the wanted key set (`bindingsForMode(mode)` in
 `keymap.ts`) against `this.stolenSpecs` and calls
 `app.stealKeys`/`releaseKeys` incrementally. RemNote's steal matcher cannot
-distinguish Shift — see `keymap.ts`'s top comment and VIM_STATUS.md §3
-blocker #0 for the full empirical writeup. Practical consequence for anyone
+distinguish Shift — see `keymap.ts`'s top comment and §9 for the empirical
+writeup. Practical consequence for anyone
 adding a keybinding: **you cannot bind a capital letter or a shifted symbol
 to a different command than its lowercase key** — RemNote reports both as the
 same spec. The existing pattern is unshifted synonyms via `g`-chords (`ge` =
@@ -326,8 +387,7 @@ will silently test a different algorithm than production runs.
 
 ## 7. Testing
 
-Two independent layers with different jobs — see VIM_STATUS.md §5 for the
-original rationale. Prefer the unit suite for anything that's pure vim
+Two independent layers with different jobs. Prefer the unit suite for anything that's pure vim
 semantics; reach for e2e only when the bug is specifically about RemNote
 integration (caret visibility, focus survival, tree structure).
 
@@ -456,8 +516,19 @@ live (`eval "getComputedStyle(document.body,'::before').content"`).
 
 ## 9. Platform constraints (read before fighting the SDK)
 
-Full empirical writeup lives in VIM_STATUS.md §3 — summary of what's actually
-enforced in code you'll touch:
+What's actually enforced in code you'll touch (all verified empirically
+against RemNote 1.26.30):
+
+- **Key stealing is SHIFT-BLIND.** The steal matcher reports the bare key
+  regardless of Shift, and `shift+…` specs never match at all (probed live:
+  with only `shift+v` stolen, neither `v` nor `V` is captured; with `v`
+  stolen, both are captured and reported as `v`; `$` reports as `4`, `Q` as
+  `q`). Ctrl combinations DO match correctly.
+- **Leading whitespace**: RemNote's data layer trims it from a Rem
+  immediately while the editor keeps it until a later normalization. The
+  adapter mirrors the trim (`normalizeModel`) and extends column-0 deletes
+  over the doomed whitespace — except `keepLead` (change-family) deletes,
+  which stay vim-exact because an insert follows immediately.
 
 - **Shift is unobservable** (`keymap.ts` top comment) → no real capital-key
   bindings, ever. Use the synonym pattern (§6).

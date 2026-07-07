@@ -2,10 +2,9 @@
 
 Modal, vim-style editing for the RemNote desktop app, as a RemNote plugin.
 
-See **[VIM_STATUS.md](./VIM_STATUS.md)** for exactly what works today, what's
-blocked, and what's planned. See **[DEVELOPMENT.md](./DEVELOPMENT.md)** for
-the architecture deep-dive: how to add new commands, debug live issues, and
-run the full test suite.
+See **[DEVELOPMENT.md](./DEVELOPMENT.md)** for everything: the work log,
+what works today (§0.5), platform blockers (§9), the architecture deep-dive,
+how to add new commands, debug live issues, and run the full test suite.
 
 ## Layout
 
@@ -13,7 +12,7 @@ run the full test suite.
 src/engine/     pure vim state machine (no RemNote) — the tested core
 src/adapter/    engine ⇄ RemNote plugin API (key stealing, editor ops, model)
 src/widgets/    plugin entry point (onActivate)
-tests/          Vitest unit suite for the engine (84 tests)
+tests/          Vitest unit suite for the engine
 e2e/            live end-to-end harness driving the real app over CDP
 public/         manifest.json
 ```
@@ -35,7 +34,7 @@ Built-in cheat sheet for vim newcomers: type `;help` (vim's `:help`) or run
 
 ## Test
 
-Two layers (see VIM_STATUS.md §5 for why):
+Two layers (see DEVELOPMENT.md §7 for why):
 
 ```bash
 npm test             # engine unit tests (Vitest) — fast, deterministic, no RemNote
