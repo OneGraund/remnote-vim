@@ -1,0 +1,5 @@
+node_modules/
+dist/
+PluginZip.zip
+e2e/.env
+e2e/shots/

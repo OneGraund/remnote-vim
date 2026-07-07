@@ -1,0 +1,22 @@
+{
+  "manifestVersion": 1,
+  "id": "remnote-vim",
+  "name": "Vim Mode",
+  "author": "onegraund",
+  "repoUrl": "https://github.com/onegraund/remnote-vim",
+  "version": {
+    "major": 0,
+    "minor": 1,
+    "patch": 0
+  },
+  "theme": [],
+  "enableOnMobile": false,
+  "description": "Modal vim-style editing for RemNote: normal/insert/visual modes, motions, operators, counts, registers.",
+  "requestNative": false,
+  "requiredScopes": [
+    {
+      "type": "All",
+      "level": "ReadCreateModifyDelete"
+    }
+  ]
+}
