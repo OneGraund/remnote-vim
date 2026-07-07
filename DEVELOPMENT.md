@@ -15,6 +15,53 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-07 night — handoff batch closed: all ☐ probes verified, visual-`e` fix
+
+Picked up the evening handoff below; every open item is now resolved.
+
+- ☑ **indentSelection rewrite live-verified** — fresh app restart to load the
+  bundle, then smoke suite **16/16 twice** (the previously-racy
+  "v j . indent" step passed both times) and stress **59/59**.
+- ☑ **`o` on a ToDo creates a sibling** — probed live via sdk-repl: built a
+  todo with `:todo`, pressed `o`; both rems report the same `getParentRem()`
+  (the daily doc), new bullet is NOT a child of the todo.
+- ☑ **`:todo` on a multi-bullet visual selection** — `vv j j` over three
+  bullets + `;todo` ⏎ set todo status on exactly the three selected rems
+  (checked via `isTodo()` on all daily-doc children; unrelated rows
+  untouched). Command exit cleared the trail, mode returned to normal.
+- ☑ **Ctrl-W with a real split pane** — opened a second pane live, then
+  `C-w h` / `C-w l` / `C-w w` each switched `getFocusedPaneId()` correctly
+  (h→left, l→right, w→cycle). *E2e recipe:* the SDK cannot open a split
+  (`window.openRem` takes no pane arg); **Shift+click on a rem-reference
+  link** opens it in a new pane (Ctrl+click and Alt+click do nothing). Close
+  it via the pane-header icon button (hover top of the pane).
+- ☑ **Charwise visual rendering** — eyeballed via screenshot: the native
+  text selection tracks the vim selection exactly (`0 v l l l` highlights
+  "task"), plus cursorline tint + left bar. Side effect noted: RemNote's
+  floating **formatting toolbar pops up over any native selection** — vim
+  charwise-visual triggers it. Harmless (keys still work) but visually noisy;
+  candidate for a mode-scoped CSS hide if it annoys.
+- ☑ **BUG FOUND+FIXED while probing: visual-mode `e` could never advance
+  past the current word end.** `state.head` is an ON-char index, but
+  `wordEnd` measures from an I-beam caret: from head on a word's last char
+  it returns head+1, and the `landsOn` −1 adjustment lands right back on
+  head — `v e e e …` stayed stuck forever (live-reproduced: selection never
+  grew past "task"). Fix in `handleVisual` (engine.ts): when a `landsOn`
+  motion makes no progress, rerun it from head+1 (vim's block-cursor "must
+  land later" rule — applies only in visual; normal-mode I-beam `e` already
+  guarantees progress). New regression test (`v e` then `e` on
+  "one two three"); 116/116 unit, fix verified live (`v e` → "task",
+  second `e` → "task one").
+- ☑ **copyText/writeClipboard decision (was the last ☐): KEEP the sandbox
+  tiers, comments fixed.** They're proven dead only on the *desktop* app;
+  the try is free, other hosts (web) may grant clipboard-write, and the
+  `clip:api`/`clip:exec` badges are exactly how we'd notice. The comments
+  now say the select+cut+reinsert fallback is the real live path instead of
+  calling the direct write "preferred". §0.5 wording was already aligned.
+
+No engine/adapter contract changes beyond the `handleVisual` fix; harness
+untouched.
+
 ### 2026-07-07 evening — HANDOFF: live e2e verified, native rem-clipboard landed
 
 Read this first — it supersedes the "BLOCKED" status of the entry below.
@@ -250,6 +297,8 @@ Known limitations (beyond §9 platform blockers):
 
 - Caret column desyncs after an intra-line mouse click (collapsed caret is
   unreadable in the sandbox); re-anchor with `0`/`gl` or enter+leave insert.
+- Charwise visual uses a real native text selection, so RemNote's floating
+  formatting toolbar pops up over it (harmless; keys keep working).
 - Capitals act as their lowercase key (shift-blind stealing); use synonyms.
 - `j`/`k` move between Rems — a bullet is one line by construction.
 

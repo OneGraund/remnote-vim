@@ -365,10 +365,12 @@ export class VimAdapter {
         break;
 
       case 'copyText': {
-        // Yank without deleting. Preferred: a direct clipboard write from the
-        // sandbox. Fallback: select the range, native-CUT it (host-side
-        // clipboard, always works), and reinsert the same text — net no-op on
-        // the document, exact text on the clipboard.
+        // Yank without deleting. The real path live is: select the range,
+        // native-CUT it (host-side clipboard, always works), and reinsert the
+        // same text — net no-op on the document, exact text on the clipboard.
+        // The direct sandbox write is tried first only because it's free and
+        // may work on hosts other than the desktop app (where it is
+        // permission-denied, §9 — watch the clip: badge).
         const ok = await this.writeClipboard(a.text);
         if (!ok && a.start != null && a.end != null && a.end > a.start) {
           await editor.selectText({ start: a.start, end: a.end });
@@ -882,8 +884,10 @@ export class VimAdapter {
   /**
    * Write `text` to the SYSTEM clipboard from the sandboxed widget iframe.
    * Tries the async clipboard API first, then the legacy execCommand path.
-   * Returns false when both are blocked (unfocused sandbox documents may
-   * reject clipboard writes) so callers can try a native-editor fallback.
+   * KNOWN DEAD on the desktop app (both tiers verified permission-denied
+   * live, §9): there it always returns false and callers' native-editor
+   * fallbacks do the real work. Kept because the try is free and other hosts
+   * (web) may grant it — the clip:api/clip:exec badges reveal if one fires.
    */
   private async writeClipboard(text: string): Promise<boolean> {
     if (!text) return true;

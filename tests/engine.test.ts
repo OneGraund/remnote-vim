@@ -413,6 +413,14 @@ describe('visual mode (charwise, plain v)', () => {
     expect(e.line).toBe('one wo three');
   });
 
+  it('e advances to the NEXT word end when head is already on a word end', () => {
+    const e = h('one two three', 0, 4);
+    e.keys('ve'); // head lands ON 'o' of "two"
+    expect(e.sel).toEqual({ start: 4, end: 7 });
+    e.keys('e'); // must not get stuck: extend to the end of "three"
+    expect(e.sel).toEqual({ start: 4, end: 13 });
+  });
+
   it('vwd matches vim word selection', () => {
     const e = h('foo bar');
     e.keys('vwd');

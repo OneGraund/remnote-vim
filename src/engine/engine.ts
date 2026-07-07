@@ -599,7 +599,18 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
 
   const m = motionFor(state, key, snap, state.head);
   if (m && !m.vertical) {
-    const target = m.result.landsOn ? m.result.target - 1 : m.result.target;
+    let target = m.result.landsOn ? m.result.target - 1 : m.result.target;
+    // Inclusive motions measure from an I-beam caret, but the visual head is
+    // an ON-char index — when the head already sits on a word's last char,
+    // `e` reports that same char and the selection would never grow. Rerun
+    // the motion from one char later (vim's "must land later" block-cursor
+    // rule applies here, unlike in normal mode).
+    if (m.result.landsOn && target === state.head && state.head + 1 < n) {
+      const m2 = motionFor(state, key, snap, state.head + 1);
+      if (m2 && !m2.vertical) {
+        target = m2.result.landsOn ? m2.result.target - 1 : m2.result.target;
+      }
+    }
     const st = { ...state, head: clamp(target, 0, Math.max(0, n - 1)), count: '' };
     return { state: st, actions: [selectionAction(st, snap)] };
   }
