@@ -49,14 +49,23 @@ export function prevWordStart(s: string, c: number, big: boolean): number {
   return i;
 }
 
-/** `e` / `E`: offset just past the end of the current-or-next word. */
+/**
+ * `e` / `E`: offset just past the end of the current-or-next word.
+ *
+ * Caret-model note: vim's rule is "e must land on a LATER char", which for a
+ * block cursor means advancing by 2+ (cursor already ON the word's last
+ * char). This engine models an I-beam caret BETWEEN characters, so any
+ * forward progress is a real move: `e` with the caret before the last char
+ * of a word stops after that word (and `de` on "a asdf" deletes just "a",
+ * not everything through "asdf").
+ */
 export function wordEnd(s: string, c: number, big: boolean): number {
   const n = s.length;
   let i = c;
   if (i >= n) return n;
   if (!isSpace(s[i])) {
     const e = endOfRun(s, i, big);
-    if (e > c + 1) return e;
+    if (e > c) return e;
     i = e;
   }
   while (i < n && isSpace(s[i])) i++;

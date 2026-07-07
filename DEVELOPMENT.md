@@ -7,6 +7,76 @@ gives concrete recipes for extending or debugging the plugin. Written for
 both human contributors and future Claude Code instances picking this repo
 back up cold.
 
+> **Convention:** all in-flight plans and progress live in §0 (work log)
+> below — update it as you work so parallel contributors can see state at a
+> glance.
+
+## 0. Work log / current state
+
+### 2026-07-07 — user-reported bug batch (in progress, Claude)
+
+**Context discovered first:** `dist/` was built 2026-07-06 20:16 but
+`src/engine`+`src/adapter` were edited 2026-07-07 ~14:00 — the running plugin
+was an OLD build missing today's engine (v-cycle flip, sibling-only `o`,
+subtree registers, clipboard). Several user reports were symptoms of the
+stale build. Also: the repo had an empty `.git`; a baseline commit of the
+pre-fix state is now in history (`main`).
+
+Plan (☑ done / ☐ pending), driven by the user's report:
+
+- ☑ git init + baseline commit; `.gitignore` for node_modules/dist/zip
+- ☑ **Ctrl-W h/l panes** — root cause: `ctrl+w` was never in `keymap.ts`, so
+  the engine's pane code was unreachable. Added.
+- ☑ **v = charwise first** — engine already flipped (v → charwise, `vv` →
+  line, `vvv` → normal; j/k still auto-upgrade charwise→line). Unit tests
+  updated to the new cycle (they still asserted the old one and failed).
+- ☑ **`de` on "a asdf" deleting too much** — `wordEnd` used vim's
+  block-cursor rule (`e` must advance ≥2); switched to I-beam rule
+  (`e > c`) matching this plugin's between-chars caret model.
+- ☑ **`d$`** — already existed as `dgl`/`dgh` g-chords; now unit-tested and
+  documented ( `$` itself is unreachable: shift-blind stealing reports `4`).
+- ☑ **`;` find-repeat removed** — `;` now always opens the command line;
+  `,` keeps reverse-repeat. `/` also opens the command line.
+- ☑ **Ctrl-E/Ctrl-Y unbound** — no view-scroll API exists (only caret moves),
+  so per user's call the keys are no longer stolen.
+- ☑ **Ctrl-O/Ctrl-I jumplist** — new `jump` action; adapter records rem ids
+  before jumps (`gg`/`ge`/`:e`) with vim's truncate-forward semantics;
+  in-doc return walks the caret (stays alive), cross-doc falls back to
+  `window.openRem`.
+- ☑ **Yank → system clipboard** — layered: charwise deletes now go through
+  native `editor.cut()` (host-side clipboard, sandbox-proof); charwise `y`
+  emits new `copyText` action (async clipboard API → execCommand →
+  select+cut+reinsert fallback); line register still flattens to
+  tab-indented text via `writeClipboard`. Badge shows `clip:` status.
+  **Needs live verification** of which fallback tier actually fires.
+- ☑ **Normal-mode cursor visibility** — cursorline: `[data-rem-id]
+  :focus-within` row tint + colored left bar via registerCSS.
+- ☑ **Visual-mode `/` command palette** — `;`/`/`/`:` from visual/visual-line
+  enter command mode KEEPING the selection trail (tint stays via render());
+  new Ex verbs `:todo`, `:done`, `:untodo` apply to all selected bullets
+  (else focused bullet). Command-mode exit always clears the trail.
+- ☐ **`o` on ToDo creating a child** — believed fixed by rebuild (old build
+  had "child-aware o"; current `newBullet` is sibling-only). Verify live
+  against a todo bullet.
+- ☐ update remaining tests, `npm test` green, `tsc`, `npm run build`
+- ☐ live e2e pass (launch.sh instance): run.mjs + stress.mjs + manual probes
+  (clipboard tier, todo-o, Ctrl-W panes need 2 panes)
+- ☐ docs: VIM_STATUS.md rewrite of changed sections, `:help` widget
+  (vim_help.tsx) new keys, README touch-up
+- ☐ SERVICE_NOTES.md — design-only exploration of a background companion
+  service (CDP-based) to lift sandbox limits (shift-blindness, caret reads,
+  true scrolling, clipboard). Explicitly NOT implemented.
+
+Engine/adapter contract changes in this batch (for anyone rebasing):
+
+- `Action.deleteRange` gained `yank?: boolean` (route through native cut →
+  OS clipboard) and `keepLead?: boolean` (change-family deletes skip the
+  column-0 whitespace swallow AND the model's normalizeModel trim; `cw` must
+  leave "hello world" as "bye world", not "byeworld").
+- New actions: `copyText {text,start?,end?}`, `jump {dir}`.
+- `handleCommand` leave-path now always emits `clearRemSelection`.
+- Harness mirrors all of the above + `clipboard`/`jumps` fields for tests.
+
 ## 1. Mental model
 
 The whole plugin is built around one idea: **keep the part that has to be
@@ -274,20 +344,14 @@ expect(h.lines[0]).toBe('world');
 ```
 
 `Harness.keys(seq)` tokenizes a string (`<esc>`, `<cr>`, `<bs>`, `<space>`,
-`<c-r>`, `<c-d>`, `<c-u>`, `<c-e>`, `<c-y>` for named keys; everything else
-char-by-char) and feeds each through `handleKey` exactly like the adapter
-does, except insert-mode plain characters are typed directly into `lines`
-(mirroring that insert mode releases stolen keys live). Use a 4th constructor
-arg (`indents: number[]`) to build a nested-tree fixture for visual-line
-tests.
-
-**Known state as of this writing:** `npm test` reports 11 failing tests, all
-in the "visual-line across hierarchy (nested trees)" describe block (e.g. `G`
-in v-line not extending to the true document end on a nested fixture). This
-is a regression not reflected in VIM_STATUS.md's "84/84" figure (the suite
-has since grown to 99 tests). Check current `npm test` output before trusting
-that number, and see §6's note on `vTrail`/`normalizedTrail` if you're
-investigating it.
+`<c-r>`, `<c-d>`, `<c-u>`, `<c-w>`, `<c-o>`, `<c-i>` for named keys;
+everything else char-by-char) and feeds each through `handleKey` exactly like
+the adapter does, except insert-mode plain characters are typed directly into
+`lines` (mirroring that insert mode releases stolen keys live). Use a 4th
+constructor arg (`indents: number[]`) to build a nested-tree fixture for
+visual-line tests. `Harness.clipboard` models what the adapter would have
+written to the system clipboard; `jumps`/`jumpPos` model the adapter's
+jumplist with row numbers standing in for rem ids.
 
 ### Live e2e — `e2e/run.mjs`, `e2e/stress.mjs`, `e2e/tree.mjs`
 

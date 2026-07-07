@@ -38,20 +38,24 @@ export function handleKey(state: VimState, key: string, snap: Snapshot): EngineR
 const PAGE = 12; // Rems moved by Ctrl-D / Ctrl-U
 
 function handleCommand(state: VimState, key: string, _snap: Snapshot): EngineResult {
+  // Command mode can be entered from visual-line with the bullet selection
+  // kept alive (so :todo & friends can act on it). Leaving command mode —
+  // by running a command or cancelling — always drops that selection.
+  const leave = (actions: Action[]): EngineResult => ({
+    state: { ...state, mode: 'normal', commandLine: '' },
+    actions: [...actions, { t: 'clearRemSelection' }, { t: 'mode', mode: 'normal' }],
+  });
   if (key === 'Escape') {
-    return { ...toMode(state, 'normal', []), state: { ...state, mode: 'normal', commandLine: '' } };
+    return leave([]);
   }
   if (key === 'Enter') {
     const cmd = state.commandLine.trim();
-    const next: VimState = { ...state, mode: 'normal', commandLine: '' };
-    const actions: Action[] = [{ t: 'mode', mode: 'normal' }];
-    if (cmd) actions.unshift({ t: 'runEx', cmd });
-    return { state: next, actions };
+    return leave(cmd ? [{ t: 'runEx', cmd }] : []);
   }
   if (key === 'Backspace') {
     // Backspacing past the ':' leaves command mode entirely.
     if (state.commandLine.length === 0) {
-      return { state: { ...state, mode: 'normal', commandLine: '' }, actions: [{ t: 'mode', mode: 'normal' }] };
+      return leave([]);
     }
     return { state: { ...state, commandLine: state.commandLine.slice(0, -1) }, actions: [] };
   }
@@ -158,14 +162,13 @@ function motionFor(
       return { result: { target: head, landsOn: false }, vertical: -1 };
     case 'Enter':
       return { result: { target: head, landsOn: false }, vertical: 1 };
-    case ';':
+    // ';' is NOT a find-repeat here: it is the live spelling of ':' (command
+    // line), and doubling it up as "repeat find" made it unpredictable.
+    // ',' still repeats the last f/F/t/T in the reverse direction.
     case ',': {
       if (!state.lastFind) return null;
-      let { key: fk, ch } = state.lastFind;
-      if (key === ',') {
-        fk = ({ f: 'F', F: 'f', t: 'T', T: 't' } as const)[fk];
-      }
-      const r = findChar(text, head, fk, ch, true);
+      const fk = ({ f: 'F', F: 'f', t: 'T', T: 't' } as const)[state.lastFind.key];
+      const r = findChar(text, head, fk, state.lastFind.ch, true);
       return r ? { result: r } : null;
     }
   }
@@ -321,33 +324,34 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       if (caret >= n) return reset(state);
       const end = clamp(caret + count, 0, n);
       return reset(withCharRegister(state, text.slice(caret, end)), [
-        { t: 'deleteRange', start: caret, end },
+        { t: 'deleteRange', start: caret, end, yank: true },
       ]);
     }
     case 'X': {
       if (caret === 0) return reset(state);
       const start = clamp(caret - count, 0, n);
       return reset(withCharRegister(state, text.slice(start, caret)), [
-        { t: 'deleteRange', start, end: caret },
+        { t: 'deleteRange', start, end: caret, yank: true },
       ]);
     }
     case 's': {
       const end = clamp(caret + count, 0, n);
       const st = end > caret ? withCharRegister(state, text.slice(caret, end)) : state;
-      const acts: Action[] = end > caret ? [{ t: 'deleteRange', start: caret, end }] : [];
+      const acts: Action[] =
+        end > caret ? [{ t: 'deleteRange', start: caret, end, yank: true, keepLead: true }] : [];
       return toMode(st, 'insert', acts);
     }
     case 'D':
       return reset(withCharRegister(state, text.slice(caret)), [
-        { t: 'deleteRange', start: caret, end: n },
+        { t: 'deleteRange', start: caret, end: n, yank: true },
       ]);
     case 'C':
       return toMode(withCharRegister(state, text.slice(caret)), 'insert', [
-        { t: 'deleteRange', start: caret, end: n },
+        { t: 'deleteRange', start: caret, end: n, yank: true },
       ]);
     case 'S':
       return toMode(withCharRegister(state, text), 'insert', [
-        { t: 'deleteRange', start: 0, end: n },
+        { t: 'deleteRange', start: 0, end: n, yank: true },
       ]);
     case '~':
     case '`': {
@@ -393,22 +397,28 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       return reset(state, [{ t: 'goDoc', where: 'end' }]);
 
     // --- scrolling (approximated as caret moves; the view follows the caret)
+    // Ctrl-E/Ctrl-Y are intentionally absent: RemNote exposes no view-scroll
+    // API, so a faithful "scroll without moving the cursor" is impossible —
+    // those keys are left to RemNote.
     case 'C-d':
       return reset(state, [{ t: 'scroll', dir: 1, count: PAGE }]);
     case 'C-u':
       return reset(state, [{ t: 'scroll', dir: -1, count: PAGE }]);
-    case 'C-e':
-      return reset(state, [{ t: 'scroll', dir: 1, count: 1 }]);
-    case 'C-y':
-      return reset(state, [{ t: 'scroll', dir: -1, count: 1 }]);
     case 'C-w':
       return { state: { ...state, pending: { p: 'pane' }, count: '' }, actions: [] };
 
+    // --- jumplist
+    case 'C-o':
+      return reset(state, [{ t: 'jump', dir: -1 }]);
+    case 'C-i':
+      return reset(state, [{ t: 'jump', dir: 1 }]);
+
     // --- command-line mode. ':' is unreachable live (shift-blind stealing
-    // reports it as ';'), so ';' doubles as ':' whenever it isn't a find
-    // repeat — motionFor consumed it above when a previous f/t/F/T exists.
+    // reports it as ';'), so ';' doubles as ':' — always, now that the
+    // find-repeat meaning of ';' is retired. '/' opens it too.
     case ':':
     case ';':
+    case '/':
       return { state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } }, actions: [{ t: 'mode', mode: 'command' }] };
 
     case 'Escape':
@@ -446,7 +456,7 @@ function handleOperatorKey(state: VimState, key: string, snap: Snapshot): Engine
         return reset({ ...state, register: { kind: 'line' } }, [{ t: 'yankRem', count }]);
       case 'c':
         return toMode(withCharRegister(state, text), 'insert', [
-          { t: 'deleteRange', start: 0, end: text.length },
+          { t: 'deleteRange', start: 0, end: text.length, yank: true, keepLead: true },
         ]);
       case '>':
         return reset(state, [{ t: 'indent' }]);
@@ -492,13 +502,17 @@ function applyOperator(state: VimState, snap: Snapshot, from: number, to: number
   switch (op) {
     case 'd':
       if (start === end) return reset(state);
-      return reset(withCharRegister(state, slice), [{ t: 'deleteRange', start, end }]);
+      return reset(withCharRegister(state, slice), [{ t: 'deleteRange', start, end, yank: true }]);
     case 'c':
       return toMode(withCharRegister(state, slice), 'insert', [
-        { t: 'deleteRange', start, end },
+        { t: 'deleteRange', start, end, yank: true, keepLead: true },
       ]);
     case 'y':
-      return reset(withCharRegister(state, slice), [{ t: 'setCaret', at: start }]);
+      if (start === end) return reset(state);
+      return reset(withCharRegister(state, slice), [
+        { t: 'copyText', text: slice, start, end },
+        { t: 'setCaret', at: start },
+      ]);
     case '>':
       return reset(state, [{ t: 'indent' }]);
     case '<':
@@ -529,6 +543,35 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
   if (key === 'Escape') {
     return toMode(state, 'normal', [{ t: 'setCaret', at: clamp(state.head, 0, n) }]);
   }
+
+  // g-chords: gg/ge escalate to a line-wise selection reaching the document
+  // boundary (vim v gg / v G); gl/gh stay charwise, extending the selection
+  // to the line end / first non-blank ($ / ^ synonyms).
+  if (state.pending.p === 'g') {
+    const st: VimState = { ...state, pending: { p: 'none' }, count: '' };
+    if (key === 'g' || key === 'e') {
+      const r = toMode(st, 'visual-line', []);
+      r.actions.push({ t: 'vStart' });
+      r.actions.push({ t: 'vExtend', dir: key === 'g' ? -1 : 1, count: 1000 });
+      return r;
+    }
+    if (key === 'l' || key === 'h') {
+      const target = key === 'l' ? Math.max(0, n - 1) : firstNonBlank(text);
+      const st2 = { ...st, head: clamp(target, 0, Math.max(0, n - 1)) };
+      return { state: st2, actions: [selectionAction(st2, snap)] };
+    }
+    return { state: st, actions: [] };
+  }
+  if (key === 'g') {
+    return { state: { ...state, pending: { p: 'g' } }, actions: [] };
+  }
+  if (key === 'G') {
+    const r = toMode(state, 'visual-line', []);
+    r.actions.push({ t: 'vStart' });
+    r.actions.push({ t: 'vExtend', dir: 1, count: 1000 });
+    return r;
+  }
+
   if (key === 'v' || key === 'V') {
     // second v: switch to visual-LINE mode (whole bullets)
     const r = toMode(state, 'visual-line', []);
@@ -581,15 +624,16 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
     case 'd':
     case 'x':
       return toMode(withCharRegister(state, slice), 'normal', [
-        { t: 'deleteRange', start: range.start, end: range.end },
+        { t: 'deleteRange', start: range.start, end: range.end, yank: true },
       ]);
     case 'c':
     case 's':
       return toMode(withCharRegister(state, slice), 'insert', [
-        { t: 'deleteRange', start: range.start, end: range.end },
+        { t: 'deleteRange', start: range.start, end: range.end, yank: true, keepLead: true },
       ]);
     case 'y':
       return toMode(withCharRegister(state, slice), 'normal', [
+        { t: 'copyText', text: slice, start: range.start, end: range.end },
         { t: 'setCaret', at: range.start },
       ]);
     case 'p':
@@ -599,7 +643,7 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
       }
       const txt = state.register.text;
       return toMode(withCharRegister(state, slice), 'normal', [
-        { t: 'deleteRange', start: range.start, end: range.end },
+        { t: 'deleteRange', start: range.start, end: range.end, keepLead: true },
         { t: 'insertText', at: range.start, text: txt },
       ]);
     }
@@ -607,6 +651,16 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
       return toMode(state, 'normal', [{ t: 'indent' }]);
     case '<':
       return toMode(state, 'normal', [{ t: 'outdent' }]);
+
+    // command line from charwise visual: :todo & friends act on the focused
+    // bullet (no multi-bullet trail exists in this sub-mode)
+    case ':':
+    case ';':
+    case '/':
+      return {
+        state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } },
+        actions: [{ t: 'mode', mode: 'command' }],
+      };
   }
 
   return { state: { ...state, count: '' }, actions: [] };
@@ -679,6 +733,17 @@ function handleVisualLine(state: VimState, key: string, snap: Snapshot): EngineR
         ]);
       }
       return { state, actions: [] };
+
+    // command line over the selection: the bullet trail is deliberately NOT
+    // cleared, so Ex commands (:todo, :done, …) apply to every selected
+    // bullet. Leaving command mode clears it.
+    case ':':
+    case ';':
+    case '/':
+      return {
+        state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } },
+        actions: [{ t: 'mode', mode: 'command' }],
+      };
 
     case 'Escape':
     case 'V':

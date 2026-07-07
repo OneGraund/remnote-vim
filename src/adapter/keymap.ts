@@ -29,8 +29,11 @@ const named: KeyBinding[] = [
   { spec: 'ctrl+r', sym: 'C-r' },
   { spec: 'ctrl+d', sym: 'C-d' },
   { spec: 'ctrl+u', sym: 'C-u' },
-  { spec: 'ctrl+e', sym: 'C-e' },
-  { spec: 'ctrl+y', sym: 'C-y' },
+  // Ctrl-E/Ctrl-Y are NOT stolen: RemNote has no view-scroll API, so the vim
+  // behavior (scroll without moving the cursor) cannot be implemented.
+  { spec: 'ctrl+w', sym: 'C-w' },
+  { spec: 'ctrl+o', sym: 'C-o' },
+  { spec: 'ctrl+i', sym: 'C-i' },
 ];
 
 const plainLetters: KeyBinding[] = letters.map((l) => ({ spec: l, sym: l }));
@@ -40,6 +43,7 @@ const plainPunct: KeyBinding[] = [
   { spec: ',', sym: ',' },
   { spec: '.', sym: '.' },
   { spec: '`', sym: '`' },
+  { spec: '/', sym: '/' },
 ];
 
 export const NORMAL_BINDINGS: KeyBinding[] = [

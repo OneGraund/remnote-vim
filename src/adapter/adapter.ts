@@ -78,6 +78,15 @@ export class VimAdapter {
   private lastCutSite: { parentId: string | null; pos: number } | null = null;
   /** Debug trace of the last visual-line operation (shown in the badge). */
   private dbgV = '';
+  /** Debug: how the last clipboard write went (api/exec/cut/FAIL). */
+  private dbgClip = '';
+  /**
+   * Jumplist (Ctrl-O / Ctrl-I): rem ids recorded when a jump command leaves a
+   * position. `jumpPos === jumps.length` means "at the live end" (not
+   * currently browsing the list) — vim's model.
+   */
+  private jumps: string[] = [];
+  private jumpPos = 0;
 
   constructor(private plugin: RNPlugin) {}
 
@@ -249,7 +258,9 @@ export class VimAdapter {
       case 'deleteRange':
         m.text = m.text.slice(0, a.start) + m.text.slice(a.end);
         m.caret = clamp(a.start, 0, m.text.length);
-        this.normalizeModel();
+        // keepLead deletes keep the editor's exact text (no whitespace
+        // swallow in exec), so the model must not trim either.
+        if (!a.keepLead) this.normalizeModel();
         break;
       case 'insertText':
         m.text = m.text.slice(0, a.at) + a.text + m.text.slice(a.at);
@@ -273,6 +284,8 @@ export class VimAdapter {
       case 'indentSelection':
       case 'outdentSelection':
       case 'clearRemSelection':
+      case 'jump': // the caret lands in a different rem
+      case 'focusPane':
       case 'vExtend': // the selection head physically moves the caret
         this.invalidateModel();
         break;
@@ -280,7 +293,9 @@ export class VimAdapter {
       case 'newBullet':
       case 'vStart':
       case 'yankRemSelection':
-        // newBullet installs its own model in exec; the others don't change
+      case 'copyText':
+        // newBullet installs its own model in exec; copyText's fallback path
+        // maintains the model caret itself in exec; the others don't change
         // the focused line's text. Insert-mode exit is reconciled separately.
         break;
     }
@@ -319,12 +334,20 @@ export class VimAdapter {
         // and deleting it ourselves keeps editor, data layer and model in sync.
         let end = a.end;
         const pre = this.model?.text ?? snap.text;
-        if (a.start === 0) {
+        if (a.start === 0 && !a.keepLead) {
           while (end < pre.length && /\s/.test(pre[end])) end++;
         }
         if (end > a.start) {
           await editor.selectText({ start: a.start, end });
-          await editor.delete();
+          // Register-worthy deletes go through the editor's native CUT: same
+          // edit, but the removed text also reaches the OS clipboard (vim
+          // clipboard=unnamed). cut() runs in the host, so it works despite
+          // the sandbox's clipboard restrictions.
+          if (a.yank) {
+            await editor.cut();
+          } else {
+            await editor.delete();
+          }
         }
         this.lastCaret = a.start;
         break;
@@ -334,6 +357,22 @@ export class VimAdapter {
         await this.insertAt(a.at, a.text);
         this.lastCaret = a.at + a.text.length;
         break;
+
+      case 'copyText': {
+        // Yank without deleting. Preferred: a direct clipboard write from the
+        // sandbox. Fallback: select the range, native-CUT it (host-side
+        // clipboard, always works), and reinsert the same text — net no-op on
+        // the document, exact text on the clipboard.
+        const ok = await this.writeClipboard(a.text);
+        if (!ok && a.start != null && a.end != null && a.end > a.start) {
+          await editor.selectText({ start: a.start, end: a.end });
+          await editor.cut();
+          await editor.insertPlainText(a.text);
+          if (this.model) this.model.caret = clamp(a.end, 0, this.model.text.length);
+          this.lastCaret = a.end;
+        }
+        break;
+      }
 
       case 'moveVertical':
         for (let i = 0; i < a.count; i++) {
@@ -570,6 +609,7 @@ export class VimAdapter {
         break;
 
       case 'goDoc': {
+        await this.recordJump(); // gg/G are jumps — Ctrl-O returns here
         const dir = a.where === 'start' ? -1 : 1;
         let prevId: string | undefined;
         for (let i = 0; i < 200; i++) {
@@ -578,6 +618,31 @@ export class VimAdapter {
           if (!f || f._id === prevId) break;
           prevId = f._id;
         }
+        break;
+      }
+
+      case 'jump': {
+        const cur = (await focus.getFocusedRem())?._id;
+        if (a.dir === -1) {
+          if (this.jumpPos === this.jumps.length) {
+            // First hop back from the live position: stash it so Ctrl-I can
+            // return, then step onto the previous entry.
+            if (cur && this.jumps[this.jumps.length - 1] !== cur) {
+              this.jumps.push(cur);
+            }
+            this.jumpPos = this.jumps.length - 1;
+            if (this.jumpPos > 0 && this.jumps[this.jumpPos] === cur) this.jumpPos--;
+          } else if (this.jumpPos > 0) {
+            this.jumpPos--;
+          } else {
+            break;
+          }
+        } else {
+          if (this.jumpPos >= this.jumps.length - 1) break;
+          this.jumpPos++;
+        }
+        const targetId = this.jumps[this.jumpPos];
+        if (targetId && targetId !== cur) await this.focusRemById(targetId);
         break;
       }
 
@@ -680,11 +745,28 @@ export class VimAdapter {
           await app.toast('Usage: :e <rem name>');
           return;
         }
+        await this.recordJump(); // :e is a jump — Ctrl-O comes back
         await this.openByName(arg);
         return;
       case 'ex':
       case 'explore':
         await app.toast('Open the Rem explorer with Ctrl/Cmd-P');
+        return;
+      // --- bulk commands: act on the visual-line selection when one is
+      // active (command mode entered with ; or / from visual mode), else on
+      // the focused bullet.
+      case 'todo':
+        await this.applyToTargets('→ todo', (r) => r.setIsTodo(true));
+        return;
+      case 'done':
+        await this.applyToTargets('→ done', async (r) => {
+          await r.setIsTodo(true);
+          await r.setTodoStatus('Finished');
+        });
+        return;
+      case 'untodo':
+      case 'notodo':
+        await this.applyToTargets('todo removed', (r) => r.setIsTodo(false));
         return;
       case 'help':
       case 'h':
@@ -693,6 +775,29 @@ export class VimAdapter {
       default:
         await app.toast(`Not an editor command: ${cmd} — try :help`);
     }
+  }
+
+  /** The rems a bulk Ex command acts on: selection units, else the focused rem. */
+  private async exTargets() {
+    const units = await this.vUnits();
+    if (units.length > 0) return units;
+    const f = await this.plugin.focus.getFocusedRem();
+    return f ? [f] : [];
+  }
+
+  private async applyToTargets(
+    label: string,
+    fn: (r: { setIsTodo: (b: boolean) => Promise<void>; setTodoStatus: (s: 'Finished' | 'Unfinished') => Promise<void> }) => Promise<void>
+  ) {
+    const targets = await this.exTargets();
+    if (targets.length === 0) {
+      await this.plugin.app.toast('No bullet selected');
+      return;
+    }
+    for (const r of targets) {
+      await fn(r as unknown as Parameters<typeof fn>[0]);
+    }
+    await this.plugin.app.toast(`${targets.length} bullet${targets.length > 1 ? 's' : ''} ${label}`);
   }
 
   /** Floating widget id of the open :help window, if any. */
@@ -746,24 +851,64 @@ export class VimAdapter {
     return out;
   }
 
-  /** Best-effort copy to the SYSTEM clipboard (vim yanks are OS yanks). */
+  /**
+   * Write `text` to the SYSTEM clipboard from the sandboxed widget iframe.
+   * Tries the async clipboard API first, then the legacy execCommand path.
+   * Returns false when both are blocked (unfocused sandbox documents may
+   * reject clipboard writes) so callers can try a native-editor fallback.
+   */
+  private async writeClipboard(text: string): Promise<boolean> {
+    if (!text) return true;
+    try {
+      await navigator.clipboard.writeText(text);
+      this.dbgClip = 'clip:api';
+      return true;
+    } catch {
+      /* fall through */
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      this.dbgClip = ok ? 'clip:exec' : 'clip:FAIL';
+      return ok;
+    } catch {
+      this.dbgClip = 'clip:FAIL';
+      return false;
+    }
+  }
+
+  /** Best-effort copy of the line register (vim yanks are OS yanks). */
   private async copyRegisterToClipboard() {
     const text = this.registerToText(this.lineRegister).replace(/\n$/, '');
     if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-      } catch {
-        /* clipboard unavailable in this sandbox — register still works */
-      }
-    }
+    await this.writeClipboard(text);
+  }
+
+  // ------------------------------------------------- jumplist
+
+  /** Record the current position before a jump command leaves it (vim m'). */
+  private async recordJump() {
+    const f = await this.plugin.focus.getFocusedRem();
+    if (!f) return;
+    // A new jump truncates the forward part of the list, like vim.
+    this.jumps = this.jumps.slice(0, this.jumpPos);
+    if (this.jumps[this.jumps.length - 1] !== f._id) this.jumps.push(f._id);
+    this.jumpPos = this.jumps.length;
+  }
+
+  /**
+   * Put the caret into `id`: walk visible rows if it is on screen in the
+   * current document (keeps the caret alive), otherwise open the rem — the
+   * cross-document case, where a click is needed afterwards anyway.
+   */
+  private async focusRemById(id: string) {
+    if (await this.walkCaretTo(id, -1)) return;
+    const r = await this.plugin.rem.findOne(id);
+    if (r) await this.plugin.window.openRem(r);
   }
 
   /** Serialize a Rem including its whole subtree into a register node. */
@@ -993,14 +1138,27 @@ export class VimAdapter {
       mode === 'command'
         ? `:${this.state.commandLine.replace(/["\\]/g, '')}`
         : `-- ${MODE_LABELS[mode]} --`;
+    // The visual-line tint survives into command mode so the user can see
+    // what :todo/:done will act on while typing the command.
     const selCss =
-      mode === 'visual-line' && this.vSelIds.length
+      (mode === 'visual-line' || mode === 'command') && this.vSelIds.length
         ? this.vSelIds
             .map(
               (id) =>
                 `[data-rem-id="${id}"] { background: rgba(217,119,6,0.16); border-radius: 4px; }`
             )
             .join('\n')
+        : '';
+    // Cursorline: outside insert mode the focused row gets a faint tint and a
+    // colored bar at its left edge, so the (thin) caret is findable at a
+    // glance — vim's 'cursorline' for an outliner.
+    const cursorLineCss =
+      mode === 'normal' || mode === 'visual' || mode === 'command'
+        ? `
+      [data-rem-id]:focus-within {
+        background: rgba(124,58,237,0.07); border-radius: 4px;
+        box-shadow: inset 3px 0 0 0 ${color};
+      }`
         : '';
     await this.plugin.app.registerCSS(
       'vim-mode',
@@ -1014,13 +1172,14 @@ export class VimAdapter {
         pointer-events: none; opacity: 0.9;
       }
       body::before {
-        content: "vim ${mode} rx=${this.dbgCount} done=${this.dbgDone} k=${this.dbgLast} ${this.dbgV}";
+        content: "vim ${mode} rx=${this.dbgCount} done=${this.dbgDone} k=${this.dbgLast} ${this.dbgV} ${this.dbgClip}";
         position: fixed; left: 8px; bottom: 8px; z-index: 99999; max-width: 90vw;
         font: 10px ui-monospace, monospace; color: #aaa; white-space: nowrap; overflow: hidden;
         background: rgba(0,0,0,0.6); padding: 1px 6px; border-radius: 4px;
         pointer-events: none;
       }
       ${mode !== 'insert' ? `[contenteditable="true"] { caret-color: ${color}; }` : ''}
+      ${cursorLineCss}
       ${selCss}
       `
     );

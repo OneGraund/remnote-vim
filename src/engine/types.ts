@@ -19,8 +19,26 @@ export interface Snapshot {
 export type Action =
   | { t: 'setCaret'; at: number }
   | { t: 'select'; start: number; end: number }
-  | { t: 'deleteRange'; start: number; end: number }
+  /**
+   * `yank: true` marks register-worthy deletes (x, dw, visual d, c, s, …):
+   * the adapter routes them through the editor's native CUT so the removed
+   * text also lands on the system clipboard, vim `clipboard=unnamed` style.
+   * Internal edits (r, ~, visual-p replace) leave the clipboard alone.
+   *
+   * `keepLead: true` suppresses the adapter's column-0 whitespace swallow
+   * (RemNote's data layer trims leading spaces, so plain deletes remove them
+   * eagerly). Change-style deletes set it: text is typed/inserted right at
+   * the start, so no leading space survives anyway and vim's exact range
+   * must be kept (`cw` on "hello world" must leave the space alone).
+   */
+  | { t: 'deleteRange'; start: number; end: number; yank?: boolean; keepLead?: boolean }
   | { t: 'insertText'; at: number; text: string }
+  /**
+   * Put `text` on the system clipboard (yank without deleting). `start`/`end`
+   * give the source range in the focused line so the adapter can fall back to
+   * a native cut+reinsert when direct clipboard writes are blocked.
+   */
+  | { t: 'copyText'; text: string; start?: number; end?: number }
   | { t: 'moveVertical'; dir: -1 | 1; count: number }
   | { t: 'undo' }
   | { t: 'redo' }
@@ -51,6 +69,8 @@ export type Action =
   | { t: 'runEx'; cmd: string }
   /** Focus the previous (-1) or next (+1) pane (Ctrl-W h / Ctrl-W l). */
   | { t: 'focusPane'; dir: -1 | 1 }
+  /** Jumplist navigation: Ctrl-O (back, -1) / Ctrl-I (forward, +1). */
+  | { t: 'jump'; dir: -1 | 1 }
   | { t: 'mode'; mode: Mode };
 
 /** The register: either in-line text or whole-line (Rem) content held by the adapter. */

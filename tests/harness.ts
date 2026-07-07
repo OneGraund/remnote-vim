@@ -28,6 +28,11 @@ export class Harness {
   vTrail: number[] | null = null;
   /** [lo, hi] rows of the active selection (derived from the trail). */
   vSelRows: [number, number] | null = null;
+  /** What the adapter would have written to the system clipboard. */
+  clipboard: string | null = null;
+  /** Jumplist rows (adapter keeps rem ids; rows model the same thing here). */
+  jumps: number[] = [];
+  jumpPos = 0;
   state: VimState;
 
   private undoStack: DocState[] = [];
@@ -134,6 +139,12 @@ export class Harness {
     this.redoStack = [];
   }
 
+  private recordJump() {
+    this.jumps = this.jumps.slice(0, this.jumpPos);
+    if (this.jumps[this.jumps.length - 1] !== this.row) this.jumps.push(this.row);
+    this.jumpPos = this.jumps.length;
+  }
+
   private exec(a: Action) {
     switch (a.t) {
       case 'setCaret':
@@ -145,11 +156,22 @@ export class Harness {
         break;
       case 'deleteRange': {
         const l = this.line;
-        this.lines[this.row] = l.slice(0, a.start) + l.slice(a.end);
+        // Mirror the adapter: a deletion starting at column 0 swallows the
+        // whitespace run that would become the new line start (RemNote's
+        // data layer trims it anyway).
+        let end = a.end;
+        if (a.start === 0 && !a.keepLead) {
+          while (end < l.length && /\s/.test(l[end])) end++;
+        }
+        if (a.yank) this.clipboard = l.slice(a.start, end);
+        this.lines[this.row] = l.slice(0, a.start) + l.slice(end);
         this.caret = a.start;
         this.sel = null;
         break;
       }
+      case 'copyText':
+        this.clipboard = a.text;
+        break;
       case 'insertText': {
         const l = this.line;
         this.lines[this.row] = l.slice(0, a.at) + a.text + l.slice(a.at);
@@ -165,6 +187,7 @@ export class Harness {
       case 'deleteRem': {
         const count = Math.min(a.count, this.lines.length - this.row);
         this.lineRegister = this.lines.slice(this.row, this.row + count);
+        this.clipboard = this.lineRegister.join('\n');
         this.lines.splice(this.row, count);
         this.indents.splice(this.row, count);
         if (this.lines.length === 0) {
@@ -178,6 +201,7 @@ export class Harness {
       }
       case 'yankRem':
         this.lineRegister = this.lines.slice(this.row, this.row + a.count);
+        this.clipboard = this.lineRegister.join('\n');
         break;
       case 'pasteRem': {
         const at = a.where === 'below' ? this.row + 1 : this.row;
@@ -238,6 +262,7 @@ export class Harness {
         for (const r of units) for (const x of this.subtreeRows(r)) all.add(x);
         const rows = [...all].sort((a2, b2) => a2 - b2);
         this.lineRegister = rows.map((r) => this.lines[r]);
+        this.clipboard = this.lineRegister.join('\n');
         for (let i = rows.length - 1; i >= 0; i--) {
           this.lines.splice(rows[i], 1);
           this.indents.splice(rows[i], 1);
@@ -257,6 +282,7 @@ export class Harness {
         const all = new Set<number>();
         for (const r of units) for (const x of this.subtreeRows(r)) all.add(x);
         this.lineRegister = [...all].sort((a2, b2) => a2 - b2).map((r) => this.lines[r]);
+        this.clipboard = this.lineRegister.join('\n');
         this.row = this.vTrail?.[0] ?? this.row;
         this.vTrail = null;
         this.syncVSel();
@@ -284,9 +310,33 @@ export class Harness {
         this.syncVSel();
         break;
       case 'goDoc':
+        this.recordJump();
         this.row = a.where === 'start' ? 0 : this.lines.length - 1;
         this.caret = 0;
         this.sel = null;
+        break;
+      case 'jump': {
+        // Same algorithm as the adapter (rows stand in for rem ids).
+        if (a.dir === -1) {
+          if (this.jumpPos === this.jumps.length) {
+            if (this.jumps[this.jumps.length - 1] !== this.row) this.jumps.push(this.row);
+            this.jumpPos = this.jumps.length - 1;
+            if (this.jumpPos > 0 && this.jumps[this.jumpPos] === this.row) this.jumpPos--;
+          } else if (this.jumpPos > 0) {
+            this.jumpPos--;
+          } else break;
+        } else {
+          if (this.jumpPos >= this.jumps.length - 1) break;
+          this.jumpPos++;
+        }
+        const target = this.jumps[this.jumpPos];
+        if (target != null) {
+          this.row = clamp(target, 0, this.lines.length - 1);
+          this.caret = 0;
+        }
+        break;
+      }
+      case 'focusPane':
         break;
       case 'undo': {
         const s = this.undoStack.pop();
@@ -341,8 +391,9 @@ function tokenize(seq: string): string[] {
           'c-r': 'C-r',
           'c-d': 'C-d',
           'c-u': 'C-u',
-          'c-e': 'C-e',
-          'c-y': 'C-y',
+          'c-w': 'C-w',
+          'c-o': 'C-o',
+          'c-i': 'C-i',
         };
         if (map[name]) {
           out.push(map[name]);

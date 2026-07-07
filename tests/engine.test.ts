@@ -60,14 +60,14 @@ describe('motions', () => {
     expect(e.caret).toBe(4);
   });
 
-  it('f/t/;/, char search', () => {
+  it('f/t/, char search (; is the command line, not a repeat)', () => {
     const e = h('hello world');
     e.keys('fo');
     expect(e.caret).toBe(5); // after the first o
-    e.keys(';');
+    e.keys('fo');
     expect(e.caret).toBe(8); // after the o in world
     e.keys(',');
-    expect(e.caret).toBe(4); // back before first o
+    expect(e.caret).toBe(4); // , reverse-repeats: back before first o
     const e2 = h('hello world');
     e2.keys('t ');
     expect(e2.caret).toBe(5); // just before the space
@@ -171,15 +171,40 @@ describe('operators with motions', () => {
   });
 
   it('de, d$, d0', () => {
+    // vim would leave " world"; the adapter mirrors RemNote's leading-space
+    // trim, so a column-0 delete swallows the whitespace run too.
     const e = h('hello world');
     e.keys('de');
-    expect(e.line).toBe(' world');
+    expect(e.line).toBe('world');
     const e2 = h('hello world', 0, 5);
     e2.keys('d$');
     expect(e2.line).toBe('hello');
     const e3 = h('hello world', 0, 6);
     e3.keys('d0');
     expect(e3.line).toBe('world');
+  });
+
+  it('de on a one-char word deletes just that word (I-beam e)', () => {
+    // the reported bug: "a asdf" with the caret at 0 — de must delete "a",
+    // not everything through "asdf"
+    const e = h('a asdf');
+    e.keys('de');
+    expect(e.line).toBe('asdf');
+    // and plain e from the same spot moves one word-end, not two
+    const e2 = h('a asdf');
+    e2.keys('e');
+    expect(e2.caret).toBe(1);
+    e2.keys('e');
+    expect(e2.caret).toBe(6);
+  });
+
+  it('dgl deletes to end of line (live d$), dgh to first non-blank', () => {
+    const e = h('hello world', 0, 5);
+    e.keys('dgl');
+    expect(e.line).toBe('hello');
+    const e2 = h('hello world', 0, 6);
+    e2.keys('dgh');
+    expect(e2.line).toBe('world');
   });
 
   it('d with count: d2w', () => {
@@ -194,7 +219,7 @@ describe('operators with motions', () => {
   it('df and dt include/exclude the target char', () => {
     const e = h('hello world');
     e.keys('dfo');
-    expect(e.line).toBe(' world');
+    expect(e.line).toBe('world'); // vim: " world"; RemNote trims the lead space
     const e2 = h('hello world');
     e2.keys('dto');
     expect(e2.line).toBe('o world');
@@ -220,7 +245,7 @@ describe('text objects', () => {
   it('diw deletes the inner word from mid-word', () => {
     const e = h('hello world', 0, 2);
     e.keys('diw');
-    expect(e.line).toBe(' world');
+    expect(e.line).toBe('world'); // vim: " world"; RemNote trims the lead space
   });
 
   it('daw also deletes trailing whitespace', () => {
@@ -366,53 +391,90 @@ describe('registers', () => {
   });
 });
 
-describe('visual mode', () => {
+describe('visual mode (charwise, plain v)', () => {
   it('v + motions + d deletes the selection inclusively', () => {
     const e = h('hello');
-    e.keys('vvlld');
+    e.keys('vlld');
     expect(e.line).toBe('lo');
     expect(e.mode).toBe('normal');
   });
 
+  it('h/l/w/b/e adjust the selection inside one bullet', () => {
+    const e = h('one two three', 0, 4);
+    e.keys('ve'); // select "two"
+    expect(e.sel).toEqual({ start: 4, end: 7 });
+    e.keys('l'); // extend over the space
+    expect(e.sel).toEqual({ start: 4, end: 8 });
+    e.keys('e'); // extend to the end of "three"
+    expect(e.sel).toEqual({ start: 4, end: 13 });
+    e.keys('bb'); // shrink back to the start of "two"
+    expect(e.sel).toEqual({ start: 4, end: 5 });
+    e.keys('d');
+    expect(e.line).toBe('one wo three');
+  });
+
   it('vwd matches vim word selection', () => {
     const e = h('foo bar');
-    e.keys('vvwd');
+    e.keys('vwd');
     expect(e.line).toBe('ar');
   });
 
   it('v$y yanks to end of line, p pastes it', () => {
     const e = h('abc', 0, 1);
-    e.keys('vv$y');
+    e.keys('v$y');
     expect(e.caret).toBe(1);
     e.keys('$p');
     expect(e.line).toBe('abcbc');
   });
 
+  it('vgl extends to end of line, vgh to first non-blank', () => {
+    const e = h('hello', 0, 1);
+    e.keys('vgld');
+    expect(e.line).toBe('h');
+    const e2 = h('  abc', 0, 4);
+    e2.keys('vghd'); // anchor on 'c', back to first non-blank: "abc" goes
+    expect(e2.line).toBe('  ');
+  });
+
   it('vc changes the selection', () => {
     const e = h('hello world', 0, 0);
-    e.keys('vvllllcbye<esc>');
+    e.keys('vllllcbye<esc>');
     expect(e.line).toBe('bye world');
   });
 
   it('o swaps anchor and head', () => {
     const e = h('abcdef', 0, 2);
-    e.keys('vvllohd');
+    e.keys('vllohd');
     expect(e.line).toBe('af');
   });
 
   it('escape leaves visual without changes', () => {
     const e = h('abc');
-    e.keys('vvll<esc>');
+    e.keys('vll<esc>');
     expect(e.line).toBe('abc');
     expect(e.mode).toBe('normal');
     expect(e.caret).toBe(2);
   });
 
-  it('V then d deletes the whole line', () => {
+  it('vv (V) then d deletes the whole line', () => {
     const e = h(['a', 'b'], 0);
-    e.keys('Vd');
+    e.keys('vvd');
     expect(e.lines).toEqual(['b']);
     expect(e.mode).toBe('normal');
+  });
+
+  it('vgg / vge escalate to a line-wise doc-boundary selection', () => {
+    const e = h(['a', 'b', 'c', 'd'], 2);
+    e.keys('vgg');
+    expect(e.mode).toBe('visual-line');
+    expect(e.vSelRows).toEqual([0, 2]);
+    e.keys('d');
+    expect(e.lines).toEqual(['d']);
+    const e2 = h(['a', 'b', 'c', 'd'], 1);
+    e2.keys('vge');
+    expect(e2.vSelRows).toEqual([1, 3]);
+    e2.keys('d');
+    expect(e2.lines).toEqual(['a']);
   });
 });
 
@@ -502,20 +564,20 @@ describe('visual-line mode (multi-bullet)', () => {
 describe('shift-blind synonyms (live-reachable spellings)', () => {
   const doc = () => ['one', 'two', 'three', 'four'];
 
-  it('single v enters visual-line mode (outliner-first, V arrives as v)', () => {
+  it('single v enters CHARWISE visual (in-bullet selection first)', () => {
     const e = h(doc(), 0);
     e.keys('v');
-    expect(e.mode).toBe('visual-line');
-    e.keys('jd');
+    expect(e.mode).toBe('visual');
+    e.keys('jd'); // j upgrades to line-wise, so vjd still cuts two bullets
     expect(e.lines).toEqual(['three', 'four']);
   });
 
-  it('v cycles: line-mode → charwise → normal', () => {
+  it('v cycles: charwise → line-mode → normal', () => {
     const e = h('hello');
     e.keys('v');
-    expect(e.mode).toBe('visual-line');
-    e.keys('v');
     expect(e.mode).toBe('visual');
+    e.keys('v');
+    expect(e.mode).toBe('visual-line');
     e.keys('v');
     expect(e.mode).toBe('normal');
   });
@@ -541,12 +603,12 @@ describe('shift-blind synonyms (live-reachable spellings)', () => {
     expect(e.lines).toEqual(['one', 'four']);
   });
 
-  it('vv gives charwise visual, then lld deletes chars', () => {
-    const e = h('hello', 0);
+  it('vv gives line-wise visual (V), then jd cuts bullets', () => {
+    const e = h(doc(), 0);
     e.keys('vv');
-    expect(e.mode).toBe('visual');
-    e.keys('lld');
-    expect(e.line).toBe('lo');
+    expect(e.mode).toBe('visual-line');
+    e.keys('jd');
+    expect(e.lines).toEqual(['three', 'four']);
   });
 
   it('. and , indent/outdent in visual-line', () => {
@@ -565,11 +627,25 @@ describe('shift-blind synonyms (live-reachable spellings)', () => {
     expect(e.lastEx).toBe('w');
   });
 
-  it('; after f still repeats the find', () => {
+  it('; opens the command line even after an f find (repeat retired)', () => {
     const e = h('a.b.c');
-    e.keys('f.;');
+    e.keys('f.');
+    expect(e.caret).toBe(2);
+    e.keys(';');
+    expect(e.mode).toBe('command');
+    e.keys('<esc>');
+    // , still reverse-repeats the find
+    e.keys('f.,');
+    expect(e.caret).toBe(1);
+  });
+
+  it('/ opens the command line too', () => {
+    const e = h('abc');
+    e.keys('/');
+    expect(e.mode).toBe('command');
+    e.keys('todo<cr>');
+    expect(e.lastEx).toBe('todo');
     expect(e.mode).toBe('normal');
-    expect(e.caret).toBe(4); // after the second dot
   });
 
   it('backtick toggles case like ~', () => {
@@ -671,7 +747,7 @@ describe('edge cases', () => {
   });
 });
 
-describe('scrolling (Ctrl-D/U/E/Y)', () => {
+describe('scrolling (Ctrl-D/U)', () => {
   const doc = () => Array.from({ length: 30 }, (_, i) => `line${i}`);
 
   it('Ctrl-D moves the caret down a page, Ctrl-U up', () => {
@@ -684,20 +760,126 @@ describe('scrolling (Ctrl-D/U/E/Y)', () => {
     expect(e.row).toBe(12);
   });
 
-  it('Ctrl-E / Ctrl-Y nudge one Rem', () => {
-    const e = h(doc(), 5);
-    e.keys('<c-e>');
-    expect(e.row).toBe(6);
-    e.keys('<c-y>');
-    expect(e.row).toBe(5);
-  });
-
   it('scrolling clamps at the ends', () => {
     const e = h(doc(), 0);
     e.keys('<c-u>');
     expect(e.row).toBe(0);
     e.keys('<c-d><c-d><c-d>');
     expect(e.row).toBe(29);
+  });
+});
+
+describe('jumplist (Ctrl-O / Ctrl-I)', () => {
+  const doc = () => ['a', 'b', 'c', 'd', 'e'];
+
+  it('Ctrl-O returns to where a gg/ge jump left from, Ctrl-I re-jumps', () => {
+    const e = h(doc(), 2);
+    e.keys('ge'); // jump to doc end; records row 2
+    expect(e.row).toBe(4);
+    e.keys('<c-o>');
+    expect(e.row).toBe(2);
+    e.keys('<c-i>');
+    expect(e.row).toBe(4);
+  });
+
+  it('chained jumps walk back in order', () => {
+    const e = h(doc(), 1);
+    e.keys('ge'); // 1 → 4, jumps: [1]
+    e.keys('gg'); // 4 → 0, jumps: [1, 4]
+    expect(e.row).toBe(0);
+    e.keys('<c-o>');
+    expect(e.row).toBe(4);
+    e.keys('<c-o>');
+    expect(e.row).toBe(1);
+    e.keys('<c-o>'); // list exhausted: stays
+    expect(e.row).toBe(1);
+    e.keys('<c-i>');
+    expect(e.row).toBe(4);
+    e.keys('<c-i>');
+    expect(e.row).toBe(0);
+    e.keys('<c-i>'); // at the newest entry: stays
+    expect(e.row).toBe(0);
+  });
+
+  it('a new jump truncates the forward list (vim semantics)', () => {
+    const e = h(doc(), 1);
+    e.keys('ge'); // jumps: [1]
+    e.keys('<c-o>'); // back at 1
+    expect(e.row).toBe(1);
+    e.keys('ge'); // new jump from 1 truncates the stashed forward entry
+    e.keys('<c-o>');
+    expect(e.row).toBe(1);
+  });
+});
+
+describe('yank/delete → system clipboard', () => {
+  it('yw copies the yanked text', () => {
+    const e = h('hello world');
+    e.keys('yw');
+    expect(e.clipboard).toBe('hello ');
+    expect(e.line).toBe('hello world'); // yank does not edit
+  });
+
+  it('x and dw copy the deleted text (clipboard=unnamed)', () => {
+    const e = h('abc');
+    e.keys('x');
+    expect(e.clipboard).toBe('a');
+    const e2 = h('hello world');
+    e2.keys('dw');
+    expect(e2.clipboard).toBe('hello ');
+  });
+
+  it('r and ~ do NOT touch the clipboard', () => {
+    const e = h('abc');
+    e.keys('yl'); // clipboard: "a"
+    e.keys('rz`');
+    expect(e.clipboard).toBe('a');
+  });
+
+  it('yy and visual-line yanks copy whole bullets', () => {
+    const e = h(['one', 'two', 'three'], 0);
+    e.keys('yy');
+    expect(e.clipboard).toBe('one');
+    e.keys('vjy'); // visual-line yank of two bullets
+    expect(e.clipboard).toBe('one\ntwo');
+  });
+
+  it('charwise visual y copies the selection', () => {
+    const e = h('hello world', 0, 6);
+    e.keys('vey');
+    expect(e.clipboard).toBe('world');
+  });
+});
+
+describe('command line over a visual selection', () => {
+  it('; from visual-line keeps the selection through command mode', () => {
+    const e = h(['one', 'two', 'three'], 0);
+    e.keys('vj'); // line-select rows 0-1
+    expect(e.vSelRows).toEqual([0, 1]);
+    e.keys(';');
+    expect(e.mode).toBe('command');
+    expect(e.vSelRows).toEqual([0, 1]); // selection survives into command mode
+    e.keys('todo<cr>');
+    expect(e.lastEx).toBe('todo');
+    expect(e.mode).toBe('normal');
+    expect(e.vSelRows).toBeNull(); // and is cleared afterwards
+  });
+
+  it('/ from visual-line opens the command line the same way', () => {
+    const e = h(['one', 'two'], 0);
+    e.keys('vj/');
+    expect(e.mode).toBe('command');
+    expect(e.vSelRows).toEqual([0, 1]);
+    e.keys('<esc>');
+    expect(e.mode).toBe('normal');
+    expect(e.vSelRows).toBeNull(); // escape clears it too
+  });
+
+  it('documents are untouched by a selection command round-trip', () => {
+    const e = h(['one', 'two', 'three'], 0);
+    e.keys('vj;done<cr>');
+    expect(e.lines).toEqual(['one', 'two', 'three']);
+    expect(e.lastEx).toBe('done');
   });
 });
 
