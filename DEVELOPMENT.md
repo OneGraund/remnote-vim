@@ -79,9 +79,10 @@ Plan (☑ done / ☐ pending), driven by the user's report:
   recoverable from commit 122d18e). Its live content now lives here: feature
   status → §0.5, blockers → §9. `:help` widget (vim_help.tsx) updated with
   the new keys; README links fixed.
-- ☐ SERVICE_NOTES.md — design-only exploration of a background companion
-  service (CDP-based) to lift sandbox limits (shift-blindness, caret reads,
-  true scrolling, clipboard). Explicitly NOT implemented.
+- ☑ [SERVICE_NOTES.md](./SERVICE_NOTES.md) — design-only exploration of a
+  background companion service (CDP-based) to lift sandbox limits
+  (shift-blindness, caret reads, true scrolling, clipboard). Explicitly NOT
+  implemented; verdict: park it, file upstream issues first.
 
 Engine/adapter contract changes in this batch (for anyone rebasing):
 
