@@ -24,7 +24,7 @@ const sock =
   process.env.YDOTOOL_SOCKET ?? `/run/user/${process.getuid()}/.ydotool_socket`;
 
 // Linux input event codes (see input-event-codes.h).
-const KEY = { ctrl: 29, w: 17, h: 35, l: 38, escape: 1 };
+const KEY = { ctrl: 29, w: 17, h: 35, l: 38, o: 24, i: 23, escape: 1 };
 
 function realKey(codes) {
   // codes: array like [[29,1],[35,1],[35,0],[29,0]]
@@ -101,6 +101,21 @@ realKey(chord(KEY.ctrl, KEY.l));
 await page.waitForTimeout(500);
 b1 = await badge();
 check('real Ctrl+L reaches the key steal', b1.rx === b0.rx + 1, `k=${b1.k}`);
+
+// Ctrl+O / Ctrl+I (jumplist) do NOT arrive over CDP but DO from real
+// hardware — this is the only suite that can cover their delivery. The two
+// presses cancel out (back then forward), so document state is preserved.
+b0 = await badge();
+realKey(chord(KEY.ctrl, KEY.o));
+await page.waitForTimeout(500);
+b1 = await badge();
+check('real Ctrl+O reaches the key steal', b1.rx === b0.rx + 1, `k=${b1.k}`);
+
+b0 = await badge();
+realKey(chord(KEY.ctrl, KEY.i));
+await page.waitForTimeout(500);
+b1 = await badge();
+check('real Ctrl+I reaches the key steal', b1.rx === b0.rx + 1, `k=${b1.k}`);
 
 // -- 3. document the Ctrl+W platform hole ------------------------------------
 b0 = await badge();

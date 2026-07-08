@@ -15,6 +15,54 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 later — handoff closed: :s / panes / wildmenu all live-verified; pane-focus fix; cmdline shift-blindness mapped
+
+Picked up the handoff below; every open item is resolved. Suites at the end
+of this session: unit **119/119**, `tsc` clean, smoke **16/16**, stress
+**59/59**, real-input **6/6** (now includes C-o/C-i).
+
+- ☑ **`:s` live-verified end-to-end** (typed through the real command line):
+  plain (`;s/alpha/one/` on the focused bullet), `g` (all matches per
+  bullet), default first-match-only, `i`/`gi` on a case-mixed fixture, `a`
+  (whole doc, proven focus-independent), and a `v j` visual-line selection as
+  the implicit range — in-range bullets substituted, out-of-range untouched,
+  `'<,'>` marker shown in the badge. Replacement `$`-expansion (`$$`→literal,
+  `$&`, `$1`) and vim `\1..\9` backrefs verified against real rich text via
+  direct `substitute()` calls from sdk-repl — they are **untypeable from the
+  keyboard** (see the new §9 entry), so keystroke tests can't reach them.
+- ☑ **Pane Ex commands live-verified**: `;vs` (side-by-side duplicate), `;sp`
+  (stacked), `;vs gamma` (search + open beside), `;q` (close focused), `;only`.
+  Layout + docs asserted via `getOpenPaneIds`/`getOpenPaneRemId`, screenshots
+  eyeballed.
+- ☑ **BUG FOUND+FIXED while verifying panes: every `setRemWindowTree` call
+  regenerates all pane ids and drops the pane focus entirely** — after any
+  `:vs/:sp/:q/:only` the caret was dead until a real click. New `setPaneTree()`
+  wrapper re-fetches the ids after the rebuild and `setFocusedPaneId`s the
+  right leaf: the NEW pane for splits (vim focuses the new window), the
+  survivor at the closed index for `:q`, the kept pane for `:only`. Verified
+  live: `;vs gamma` lands focus in the gamma pane, then `;q` typed with NO
+  intervening click closes it and restores the caret to the exact pre-split
+  rem (alpha). Also confirms `getOpenPaneIds()` order matches the leaf order.
+- ☑ **Wildmenu live-verified**: catalog renders stacked above the badge;
+  verb filtering (`;s` → `:s/`+`:sp`); Tab cycles with the `▸` marker, applies
+  `complete` (trailing space for rem-arg verbs), wraps; `;e gam` runs the live
+  doc search; Tab+Enter opens the hit with the caret ON the target bullet.
+  Stale-async guard proven live by bursting `handleSym` calls (`;e gam` then
+  immediate rewrite to `q` before the search resolved — no clobber).
+- ☑ **Wildmenu fix: suggestions dedupe** by completed line (same-named rems
+  and search residue rendered as five identical `gamma` rows — useless).
+- ☑ **Badge fix: `clearVTrail` now clears `dbgV`** — after leaving
+  visual-line the badge kept showing `trail:N units:N tint:N`, which reads as
+  a live selection and cost this session a phantom-bug detour.
+- ☑ **stress.mjs C-o/C-i decision**: they were already dropped in 81134a8
+  (no such presses exist in the file). `real-input.mjs` instead gained real
+  `Ctrl+O`/`Ctrl+I` delivery checks (the only suite that can see them) — 6/6.
+- **New platform findings** (all in §9): the command line is shift-blind like
+  every other stolen key, so `:s` patterns can only use the unshifted regex
+  subset; SDK `rem.remove()` of currently-rendered rems leaves zombie rows the
+  UI still shows (clicks focus detached rems — e2e hazard, refresh via an
+  `openRem` round-trip).
+
 ### 2026-07-08 — HANDOFF to next account: command-line rework shipped (needs live verify) + bughunt results
 
 Read this first. A batch of command-line/Ex work is **committed and
@@ -413,13 +461,14 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   `Ctrl-E`/`Ctrl-Y` deliberately unbound — no view-scroll API exists.
 - **Command line** — opened with `;` only (`/` now belongs to RemNote's own
   slash-command menu; `:todo`/`:done`/`:untodo` were removed). `:help` cheat
-  sheet; `:e <name>` search+open (a jump); `:w` acknowledged (autosave).
-  **The following are committed (81134a8) but NOT yet live-verified — see the
-  2026-07-08 handoff in §0:** `:s/pat/repl/[gia]` substitute (visual selection
-  or focused bullet as range, `a` = whole doc); `:vsplit`/`:split`/`:q`/`:only`
-  pane management (via the undocumented `window.setRemWindowTree` RPC); and a
-  Tab-cycled **wildmenu** of command suggestions with live `:e`/`:vs`/`:sp`
-  document search.
+  sheet; `:e <name>` search+open (a jump); `:w` acknowledged (autosave);
+  `:s/pat/repl/[gia]` substitute (visual selection or focused bullet as
+  range, `a` = whole doc — but note the shift-blind typeable-regex subset,
+  §9); `:vsplit`/`:split`/`:q`/`:only` pane management (undocumented
+  `window.setRemWindowTree` RPC; focus follows vim semantics — new pane on
+  split, survivor on `:q`); Tab-cycled **wildmenu** of command suggestions
+  with live (deduped) `:e`/`:vs`/`:sp` document search. All live-verified
+  2026-07-08.
 - **New bullets** — `o`/`go`(=`O`) always create a *sibling* (never a child).
 - **Cursor visibility** — cursorline row tint + colored left caret bar
   outside insert mode.
@@ -790,7 +839,8 @@ The CDP suites synthesize input inside the renderer and therefore CANNOT see
 keys the Electron main process eats (real Ctrl+W — §9). This script sends
 kernel-level uinput events via **ydotool** — the identical path to a physical
 keyboard — and asserts on what actually reaches the plugin's key steal (read
-from the debug badge):
+from the debug badge). Covers `h`, `C-h`/`C-l`, `C-o`/`C-i` (CDP-invisible,
+only this suite can see them) and documents the `C-w` hole:
 
 ```bash
 systemctl --user start ydotool        # once per session (user service exists)
@@ -865,6 +915,30 @@ against RemNote 1.26.30):
 
 - **Shift is unobservable** (`keymap.ts` top comment) → no real capital-key
   bindings, ever. Use the synonym pattern (§6).
+- **The command line is shift-blind too** (typed Ex characters arrive through
+  the same steal): capitals and shifted punctuation are UNTYPEABLE in
+  `:commands` — `ALPHA` arrives as `alpha`, `$`→`4`, `%`→`5`, `(`→`9`,
+  `)`→`0`, `^`→`6`, `*`→`8`, `?`→`/`. Practical `:s` fallout: patterns are
+  limited to the unshifted regex subset (literals, `.`, `[...]`, `\d`/`\w`/
+  `\b`-style escapes, `\/`); regex groups, `$`-forms in the replacement
+  (`$1`, `$&`, `$$`) and therefore vim `\1` backrefs are code-correct
+  (verified via direct `substitute()` calls) but unreachable from the
+  keyboard; case-changing substitutions are impossible. Don't "fix" a
+  capital-letter `:s` bug report — it's this.
+- **`setRemWindowTree` regenerates every pane id and drops the pane focus**
+  (`getFocusedPaneId()` → null, caret dead until a pane is focused). There is
+  also NO layout getter, so a hand-arranged nested layout can only be rebuilt
+  flat. After any tree write, re-fetch `getOpenPaneIds()` (order matches the
+  leaf order — verified live) and `setFocusedPaneId` the intended leaf; that
+  also restores the caret to the pane's last-focused rem. `setPaneTree()` in
+  the adapter is the reference implementation — route new layout writes
+  through it.
+- **SDK `rem.remove()` of a currently-rendered rem leaves a ZOMBIE row** —
+  the data layer drops it (reads/search agree) but the open document keeps
+  rendering it, and a click focuses the detached rem (a substitute aimed at
+  "the focused bullet" then edits the zombie: reproduced live). Mostly an
+  e2e/scripting hazard: after SDK-side removals, force a re-render with an
+  `openRem` round-trip (another doc, then back) before clicking anything.
 - **The collapsed caret can't be read**, only moved relatively (§6) → don't
   add code that assumes you can query "where is the caret right now" from
   RemNote directly; track it in the model instead.

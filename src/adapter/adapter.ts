@@ -1041,12 +1041,18 @@ export class VimAdapter {
     try {
       const results = await this.plugin.search.search([arg]);
       if (seq !== this.suggestSeq) return; // a newer keystroke superseded us
-      this.suggestions = (results ?? []).slice(0, 5).map((r) => {
-        const name = (r.text ?? [])
-          .map((x) => (typeof x === 'string' ? x : ((x as { text?: string }).text ?? '')))
-          .join('');
-        return { label: name, complete: `${argMatch[1]} ${name}` };
-      });
+      // Same-named rems (and search-index residue) produce identical rows the
+      // user can't tell apart — collapse them; opening picks the top hit anyway.
+      const seen = new Set<string>();
+      this.suggestions = (results ?? [])
+        .map((r) => {
+          const name = (r.text ?? [])
+            .map((x) => (typeof x === 'string' ? x : ((x as { text?: string }).text ?? '')))
+            .join('');
+          return { label: name, complete: `${argMatch[1]} ${name}` };
+        })
+        .filter((s) => s.label !== '' && !seen.has(s.complete) && (seen.add(s.complete), true))
+        .slice(0, 5);
     } catch {
       this.suggestions = [];
     }
@@ -1099,6 +1105,22 @@ export class VimAdapter {
   }
 
   /**
+   * Apply a rebuilt pane layout and re-focus. `setRemWindowTree` regenerates
+   * every pane id and drops the pane focus entirely (probed live) — without
+   * the restore the caret is dead until the user clicks a pane. `focusIdx`
+   * indexes the new leaf order.
+   */
+  private async setPaneTree(leaves: string[], direction: 'row' | 'column', focusIdx: number) {
+    await this.winCall('setRemWindowTree', {
+      tree: leaves.length === 1 ? leaves[0] : this.buildPaneTree(leaves, direction),
+    });
+    const ids = await this.plugin.window.getOpenPaneIds();
+    const target = ids[clamp(focusIdx, 0, ids.length - 1)];
+    if (target) await this.plugin.window.setFocusedPaneId(target);
+    this.invalidateModel();
+  }
+
+  /**
    * `:vsplit`/`:split` — duplicate the focused pane (or open `arg`, found via
    * search, beside it). There is no layout GETTER, so an existing multi-pane
    * arrangement is rebuilt flat along `direction` — nesting/ratios of a
@@ -1127,7 +1149,8 @@ export class VimAdapter {
       newDoc,
       ...(docs as string[]).slice(focusedIdx + 1),
     ];
-    await this.winCall('setRemWindowTree', { tree: this.buildPaneTree(leaves, direction) });
+    // vim focuses the new window after :split/:vsplit
+    await this.setPaneTree(leaves, direction, focusedIdx + 1);
   }
 
   /** `:q` with a split open — close the focused pane. */
@@ -1138,9 +1161,7 @@ export class VimAdapter {
       return;
     }
     const leaves = (docs as string[]).filter((_, i) => i !== focusedIdx);
-    await this.winCall('setRemWindowTree', {
-      tree: leaves.length === 1 ? leaves[0] : this.buildPaneTree(leaves, 'row'),
-    });
+    await this.setPaneTree(leaves, 'row', Math.min(focusedIdx, leaves.length - 1));
   }
 
   /** `:only` — collapse the layout to just the focused pane. */
@@ -1152,7 +1173,7 @@ export class VimAdapter {
       return;
     }
     if (docs.length < 2) return;
-    await this.winCall('setRemWindowTree', { tree: keep });
+    await this.setPaneTree([keep], 'row', 0);
   }
 
   private async openByName(name: string) {
@@ -1437,6 +1458,7 @@ export class VimAdapter {
   private clearVTrail() {
     this.vTrail = null;
     this.vSelIds = [];
+    this.dbgV = ''; // stale trail:/units:/tint: in the badge reads as a live selection
   }
 
   /** Is `remId` a strict descendant of `ancestorId`? */
