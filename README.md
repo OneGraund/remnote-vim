@@ -9,10 +9,7 @@ Normal / insert / visual modes, motions, operators, counts, registers, text
 objects, marks, dot-repeat, an Ex command line, and native clipboard
 integration — driven entirely by the keyboard, right inside your RemNote notes.
 
-<!-- TODO: drop a short demo GIF here, e.g. docs/demo.gif -->
 https://github.com/user-attachments/assets/8df3a3c7-82cf-4f7d-a025-0d31f13e1263
-
-
 
 > **Desktop only.** RemNote's plugin sandbox can't steal keys reliably on
 > mobile, so the plugin declares `enableOnMobile: false`.
@@ -45,6 +42,15 @@ toggle. A `-- NORMAL --` badge appears bottom-right when it's active.
 - Toggle the whole thing on/off: command palette → **"Vim: Toggle vim mode"**.
 - The mode badge (bottom-right) shows the current mode: `-- NORMAL --`,
   `-- INSERT --`, `-- VISUAL --`, etc.
+- The **caret and the focused row are tinted in the mode color** (violet =
+  normal, amber = visual, sky = command; light and dark theme each get their
+  own palette). Insert mode keeps the editor's plain thin caret — no color
+  means "you're typing".
+- **Block cursor:** on browsers with CSS `caret-shape` support the caret is a
+  true vim-style block in normal/visual. The desktop app's current Chromium
+  doesn't support it yet, so there you get the thin colored caret + row
+  highlight until RemNote upgrades Electron — it will then light up
+  automatically.
 - Built-in cheat sheet for everything below: type **`;help`** (this plugin's
   `:help`) or run **"Vim: Help / cheat sheet"** from the command palette.
 
