@@ -41,6 +41,21 @@ const MODE_COLORS: Record<Mode, string> = {
   command: '#0ea5e9',
 };
 
+/**
+ * Brighter variants for RemNote's dark theme (`body.dark` — probed live
+ * 2026-07-08): the saturated 600-level colors above read well on white but
+ * sink into the dark background, so caret/cursorline use these instead there.
+ * The mode badge keeps MODE_COLORS on both themes (white text on saturated
+ * background works everywhere).
+ */
+const MODE_COLORS_DARK: Record<Mode, string> = {
+  normal: '#a78bfa',
+  insert: '#34d399',
+  visual: '#fbbf24',
+  'visual-line': '#fbbf24',
+  command: '#38bdf8',
+};
+
 const MODE_LABELS: Record<Mode, string> = {
   normal: 'NORMAL',
   insert: 'INSERT',
@@ -1941,15 +1956,48 @@ export class VimAdapter {
             )
             .join('\n')
         : '';
-    // Cursorline: outside insert mode the focused row gets a faint tint and a
-    // colored bar at its left edge, so the (thin) caret is findable at a
-    // glance — vim's 'cursorline' for an outliner.
+    // Cursorline: outside insert mode the focused row gets a mode-colored
+    // tint and a bar at its left edge, so the (thin) caret is findable at a
+    // glance — vim's 'cursorline' for an outliner. The sandbox can't draw a
+    // real block cursor on the host page (§9 native-mode lockout), so this
+    // plus the bright caret-color below IS the mode indicator at the caret.
+    const dark = MODE_COLORS_DARK[mode];
     const cursorLineCss =
       mode === 'normal' || mode === 'visual' || mode === 'command'
         ? `
       [data-rem-id]:focus-within {
-        background: rgba(124,58,237,0.07); border-radius: 4px;
+        background: color-mix(in srgb, ${color} 8%, transparent); border-radius: 4px;
         box-shadow: inset 3px 0 0 0 ${color};
+      }
+      body.dark [data-rem-id]:focus-within {
+        background: color-mix(in srgb, ${dark} 13%, transparent);
+        box-shadow: inset 3px 0 0 0 ${dark};
+      }`
+        : '';
+    // Caret: bright mode color outside insert; insert keeps the editor's own
+    // thin default caret, so "no colored caret" itself reads as insert mode.
+    // caret-shape is a progressive enhancement — unsupported in the desktop
+    // app's Chromium 136, but web users on newer browsers get a true block
+    // caret in normal/visual for free.
+    const caretCss =
+      mode !== 'insert'
+        ? `
+      [contenteditable="true"] { caret-color: ${color}; }
+      body.dark [contenteditable="true"] { caret-color: ${dark}; }
+      @supports (caret-shape: block) {
+        [contenteditable="true"] { caret-shape: ${mode === 'command' ? 'bar' : 'block'}; }
+      }`
+        : '';
+    // Charwise visual: the native selection is the vim selection — paint it
+    // in the mode color so it can't be mistaken for a plain mouse selection.
+    const visualSelCss =
+      mode === 'visual'
+        ? `
+      [contenteditable="true"] ::selection, [contenteditable="true"]::selection {
+        background: color-mix(in srgb, ${color} 30%, transparent);
+      }
+      body.dark [contenteditable="true"] ::selection, body.dark [contenteditable="true"]::selection {
+        background: color-mix(in srgb, ${dark} 35%, transparent);
       }`
         : '';
     await this.plugin.app.registerCSS(
@@ -1971,8 +2019,9 @@ export class VimAdapter {
         background: rgba(0,0,0,0.6); padding: 1px 6px; border-radius: 4px;
         pointer-events: none;
       }
-      ${mode !== 'insert' ? `[contenteditable="true"] { caret-color: ${color}; }` : ''}
+      ${caretCss}
       ${cursorLineCss}
+      ${visualSelCss}
       ${selCss}
       `
     );

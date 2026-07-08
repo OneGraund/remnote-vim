@@ -15,6 +15,48 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — Sandboxed visibility boost SHIPPED (user picked option (a); block-cursor WIP retired)
+
+**USER DECISION (2026-07-08):** of the block-cursor options below, the user
+chose **(a) sandboxed visibility boost** — the plugin is meant for public
+use, so only store-shippable mechanisms are in play. The native-only WIP was
+therefore **reverted from `src/adapter/adapter.ts`** (import, render hook,
+`native:` badge suffix); `src/adapter/blockCursor.ts` remains as an
+untracked local file only — if native mode ever ships, resurrect it from
+there or from this entry's git history, and see §9 for the re-test recipe.
+
+What shipped (all in `render()`, CSS-only — no engine/adapter behavior
+change):
+
+1. **Theme-aware mode palette:** new `MODE_COLORS_DARK` (violet/emerald/
+   amber/sky 400-series) used by caret + cursorline under `body.dark`
+   (RemNote's dark-theme marker, probed live); light theme keeps the
+   saturated 600-series `MODE_COLORS`. The badge keeps `MODE_COLORS` on both
+   themes.
+2. **Caret:** bright mode-colored `caret-color` outside insert (unchanged
+   idea, now theme-aware); insert deliberately has NO caret rule — the
+   editor's default thin caret itself signals insert mode. Plus
+   `@supports (caret-shape: block)`: a TRUE block caret in normal/visual
+   (bar in command) for browsers that support it — the desktop app's
+   Chromium 136 does **not** (probed live: `CSS.supports("caret-shape",
+   "block")` → false), but web users on newer browsers get it for free.
+3. **Cursorline:** focused row tint is now mode-colored via `color-mix`
+   (8% light / 13% dark, up from a fixed 7% violet) with a matching
+   3px left bar, both themes.
+4. **Visual mode:** `::selection` inside the editor is painted amber
+   (30%/35% mix) so the vim selection can't be mistaken for a plain mouse
+   selection.
+
+Verified: tsc clean, unit 360/360, live style probes per mode on BOTH themes
+(computed `caret-color`/row bg/box-shadow match the palette; insert reverts
+to defaults; `::selection` rule present in visual), screenshot sanity, smoke
+16/16, motionfix 8/8. Probe gotcha for future sessions: `page.reload()` over
+CDP throws `net::ERR_UNEXPECTED` on this Electron target — use in-page
+`location.reload()` + reconnect instead.
+
+Still open from the handoff: the §0-item-3 EOL/block-caret clamping design
+decision (unchanged by this entry).
+
 ### 2026-07-08 — NATIVE MODE INVESTIGATION CLOSED: hard-disabled platform-wide; block-cursor-via-native is a dead end on 1.26.30
 
 Same session as the motion-fix entry below; this closes the handoff's
@@ -57,7 +99,8 @@ badge shows `native:no`, stored `isNative:false`), motionfix probes 8/8.
 here and is store-poisonous). New tool committed: `e2e/main-repl.mjs`
 (main-window REPL incl. webpack-module access recipe, §7).
 
-**⚠ USER DECISION NEEDED — where to take the block cursor now.** The WIP
+**~~⚠ USER DECISION NEEDED~~ RESOLVED — user chose (a), see the entry
+above.** The WIP
 (`src/adapter/blockCursor.ts` + the adapter render hook, still uncommitted)
 is validated as an approach but can only ship if RemNote enables native mode.
 Options: (a) **sandboxed visibility boost** (brighter theme-aware
