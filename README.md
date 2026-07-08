@@ -9,7 +9,9 @@ Normal / insert / visual modes, motions, operators, counts, registers, text
 objects, marks, dot-repeat, an Ex command line, and native clipboard
 integration — driven entirely by the keyboard, right inside your RemNote notes.
 
-https://github.com/user-attachments/assets/8df3a3c7-82cf-4f7d-a025-0d31f13e1263
+
+https://github.com/user-attachments/assets/abfb4142-6f6b-4aa1-a06f-423b80e964cf
+
 
 > **Desktop only.** RemNote's plugin sandbox can't steal keys reliably on
 > mobile, so the plugin declares `enableOnMobile: false`.
