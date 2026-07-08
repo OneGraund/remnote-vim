@@ -6,27 +6,15 @@ import {
   SelectionType,
 } from '@remnote/plugin-sdk';
 import { handleKey, initialState } from '../engine/engine';
+import { stopsBetween } from '../engine/motions';
 import { Action, Mode, Snapshot, VimState } from '../engine/types';
 import { hostDocument, readDomCaret, setDomCaret } from './domCaret';
 import { bindingsForMode, SPEC_TO_SYM } from './keymap';
+import { diffCaret, flattenRich, sanitizeInsert, settleRead } from './pure';
+
+export { diffCaret } from './pure';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-
-/**
- * Infer the caret position after `pre` changed into `fresh`: find the common
- * prefix/suffix and put the caret at the end of the changed region (which is
- * where typing/deleting leaves it). If nothing changed, keep `fallback`.
- */
-export function diffCaret(pre: string, fresh: string, fallback: number): number {
-  if (pre === fresh) return clamp(fallback, 0, fresh.length);
-  let p = 0;
-  const maxP = Math.min(pre.length, fresh.length);
-  while (p < maxP && pre[p] === fresh[p]) p++;
-  let s = 0;
-  const maxS = Math.min(pre.length - p, fresh.length - p);
-  while (s < maxS && pre[pre.length - 1 - s] === fresh[fresh.length - 1 - s]) s++;
-  return clamp(fresh.length - s, 0, fresh.length);
-}
 
 /** A register entry: one bullet's rich text plus its whole subtree. */
 interface RegisterNode {
@@ -244,8 +232,18 @@ export class VimAdapter {
    */
   private model: { remId: string | undefined; text: string; caret: number } | null = null;
 
-  private invalidateModel() {
+  /**
+   * Set when the focused line's TEXT was just mutated through an SDK path the
+   * editor-read API lags behind (joinRem's setText, undo/redo, :s). The next
+   * snapshot() re-sync then reads until stable instead of trusting the first
+   * (possibly pre-mutation) read. Sticky across plain invalidations; cleared
+   * only once a settled read has been installed.
+   */
+  private modelDirty = false;
+
+  private invalidateModel(dirty = false) {
     this.model = null;
+    this.modelDirty = this.modelDirty || dirty;
   }
 
   /**
@@ -266,6 +264,16 @@ export class VimAdapter {
     }
   }
 
+  /**
+   * Read the focused line's model-space text: null when no editor is focused
+   * (transient during structural commands — must NOT be cached as ''), else
+   * the flattened rich text (see flattenRich for the offset-space contract).
+   */
+  private async readLine(): Promise<string | null> {
+    const rich = await this.plugin.editor.getFocusedEditorText();
+    return rich == null ? null : flattenRich(rich);
+  }
+
   private async snapshot(): Promise<Snapshot> {
     // Trust the local model until it is explicitly invalidated (structural
     // command, leaving insert mode, or a FocusedRemChange event). Re-reading
@@ -277,8 +285,12 @@ export class VimAdapter {
     }
     const focused = await this.plugin.focus.getFocusedRem();
     const remId = focused?._id;
-    const rich = await this.plugin.editor.getFocusedEditorText();
-    const text = rich ? (await this.plugin.richText.toString(rich)) ?? '' : '';
+    // After an SDK-side text mutation the read API can still serve the old
+    // text — read until two consecutive reads agree before trusting it.
+    const line = this.modelDirty
+      ? await settleRead(() => this.readLine(), (a, b) => a === b)
+      : await this.readLine();
+    const text = line ?? '';
     let caret: number | null = null;
     const doc = hostDocument();
     if (doc) caret = readDomCaret(doc); // native: the real caret
@@ -292,7 +304,12 @@ export class VimAdapter {
           : this.lastCaret;
     }
     caret = clamp(caret, 0, text.length);
-    this.model = { remId, text, caret };
+    // A failed read (no focused editor) must not poison the model with an
+    // empty line — leave it null so the next key re-reads.
+    if (line != null) {
+      this.model = { remId, text, caret };
+      this.modelDirty = false;
+    }
     return { text, caret };
   }
 
@@ -314,11 +331,14 @@ export class VimAdapter {
         // swallow in exec), so the model must not trim either.
         if (!a.keepLead) this.normalizeModel();
         break;
-      case 'insertText':
-        m.text = m.text.slice(0, a.at) + a.text + m.text.slice(a.at);
-        m.caret = clamp(a.at + a.text.length, 0, m.text.length);
+      case 'insertText': {
+        // Mirrors exec: atomic placeholders are stripped before insertion.
+        const ins = sanitizeInsert(a.text);
+        m.text = m.text.slice(0, a.at) + ins + m.text.slice(a.at);
+        m.caret = clamp(a.at + ins.length, 0, m.text.length);
         this.normalizeModel();
         break;
+      }
       // Anything that changes the focused rem, its structure, or triggers
       // native typing invalidates the model — re-sync on the next snapshot.
       // (newBullet sets its own fresh model in exec, so it's not listed here.)
@@ -328,21 +348,26 @@ export class VimAdapter {
       case 'goDoc':
       case 'indent':
       case 'outdent':
-      case 'undo':
-      case 'redo':
       case 'scroll':
-      case 'runEx':
       case 'deleteRemSelection':
       case 'indentSelection':
       case 'outdentSelection':
       case 'clearRemSelection':
       case 'jump': // the caret lands in a different rem
       case 'gotoMark': // ditto
-      case 'joinRem': // the focused line's text grew by the joined sibling
       case 'focusPane':
       case 'vExtend': // the selection head physically moves the caret
       case 'yankRemSelection': // native copy parks the caret on the first line
         this.invalidateModel();
+        break;
+      // These mutate the FOCUSED line's text through SDK paths the editor
+      // read lags behind — mark the model dirty so the next snapshot reads
+      // until stable instead of trusting a possibly pre-mutation read.
+      case 'undo':
+      case 'redo':
+      case 'runEx':
+      case 'joinRem': // the focused line's text grew by the joined sibling
+        this.invalidateModel(true);
         break;
       case 'mode':
       case 'newBullet':
@@ -365,14 +390,16 @@ export class VimAdapter {
     const { editor, rem, focus } = this.plugin;
     switch (a.t) {
       case 'setCaret': {
-        // Move the REAL caret by a relative CHARACTER delta from the model's
-        // pre-action position. (MoveUnit.LINE is a no-op in RemNote, but
-        // CHARACTER deltas move the live cursor — this is what makes h/l/w/e/0
-        // visible on screen.) exec runs before updateModel, so this.model still
-        // holds the pre-action caret.
+        // Move the REAL caret by a relative delta from the model's pre-action
+        // position. (MoveUnit.LINE is a no-op in RemNote, but CHARACTER deltas
+        // move the live cursor — this is what makes h/l/w/e/0 visible on
+        // screen.) moveCaret counts CARET STOPS — one per code point, one per
+        // atomic element (probed live 2026-07-08) — not UTF-16 units, so the
+        // delta is converted through the model text. exec runs before
+        // updateModel, so this.model still holds the pre-action caret.
         const from = this.model?.caret ?? this.lastCaret;
         const to = clamp(a.at, 0, this.model?.text.length ?? a.at);
-        const delta = to - from;
+        const delta = this.model ? stopsBetween(this.model.text, from, to) : to - from;
         if (delta !== 0) {
           await editor.moveCaret(delta, MoveUnit.CHARACTER);
         }
@@ -397,7 +424,7 @@ export class VimAdapter {
           await editor.selectText({ start: to, end: to });
         } else {
           const from = this.model?.caret ?? this.lastCaret;
-          const delta = to - from;
+          const delta = this.model ? stopsBetween(this.model.text, from, to) : to - from;
           if (delta !== 0) await editor.moveCaret(delta, MoveUnit.CHARACTER);
         }
         if (this.model) this.model.caret = to;
@@ -431,10 +458,13 @@ export class VimAdapter {
         break;
       }
 
-      case 'insertText':
-        await this.insertAt(a.at, a.text);
-        this.lastCaret = a.at + a.text.length;
+      case 'insertText': {
+        // Atomic placeholders never reach the document as literal text.
+        const ins = sanitizeInsert(a.text);
+        await this.insertAt(a.at, ins);
+        this.lastCaret = a.at + ins.length;
         break;
+      }
 
       case 'copyText': {
         // Yank without deleting. The real path live is: select the range,
@@ -443,8 +473,17 @@ export class VimAdapter {
         // The direct sandbox write is tried first only because it's free and
         // may work on hosts other than the desktop app (where it is
         // permission-denied, §9 — watch the clip: badge).
-        const ok = await this.writeClipboard(a.text);
-        if (!ok && a.start != null && a.end != null && a.end > a.start) {
+        const ok = await this.writeClipboard(sanitizeInsert(a.text));
+        // The cut+reinsert trick would DESTROY atomic elements (the reinsert
+        // is plain text, so a cut reference chip could not be restored) —
+        // skip it when the range contains one; the vim register still works.
+        if (
+          !ok &&
+          a.start != null &&
+          a.end != null &&
+          a.end > a.start &&
+          a.text === sanitizeInsert(a.text)
+        ) {
           await editor.selectText({ start: a.start, end: a.end });
           await editor.cut();
           await editor.insertPlainText(a.text);
@@ -502,7 +541,7 @@ export class VimAdapter {
         const focused = await focus.getFocusedRem();
         if (focused) {
           parent = (await focused.getParentRem()) ?? null;
-          const pos = (await focused.positionAmongstSiblings()) ?? 0;
+          const pos = await this.positionById(focused);
           at = a.where === 'below' ? pos + 1 : pos;
         } else if (this.lastCutSite) {
           parent = this.lastCutSite.parentId
@@ -533,7 +572,7 @@ export class VimAdapter {
         const focused = await focus.getFocusedRem();
         if (!focused) break;
         const parent = await focused.getParentRem();
-        const pos = (await focused.positionAmongstSiblings()) ?? 0;
+        const pos = await this.positionById(focused);
         const created = await rem.createRem();
         if (!created) break;
         await created.setParent(parent ?? null, a.where === 'below' ? pos + 1 : pos);
@@ -570,11 +609,14 @@ export class VimAdapter {
         if (!focused) break;
         const parent = await focused.getParentRem();
         if (!parent) break;
-        const pos = await focused.positionAmongstSiblings();
-        if (pos == null || pos === 0) break;
+        // Locate the previous sibling BY ID in the children list —
+        // positionAmongstSiblings() races the data layer right after an edit
+        // (§9; this bit the smoke suite's paste-then-indent repeatedly).
         const siblings = await parent.getChildrenRem();
-        const prev = siblings[pos - 1];
-        if (!prev) break;
+        const idx = siblings.findIndex((s) => s._id === focused._id);
+        if (idx <= 0) break;
+        const prev = siblings[idx - 1];
+        if (!prev || prev._id === focused._id) break;
         await focused.setParent(prev, (prev.children ?? []).length);
         break;
       }
@@ -588,7 +630,7 @@ export class VimAdapter {
         if (!parent || (await parent.isDocument())) break;
         const grand = await parent.getParentRem();
         if (!grand) break;
-        const parentPos = (await parent.positionAmongstSiblings()) ?? 0;
+        const parentPos = await this.positionById(parent);
         await focused.setParent(grand, parentPos + 1);
         break;
       }
@@ -679,10 +721,14 @@ export class VimAdapter {
             if (pid !== runParent || !dest) {
               runParent = pid;
               dest = null;
-              const pos = await r.positionAmongstSiblings();
-              if (!parent || pos == null || pos === 0) continue;
+              if (!parent) continue;
+              // BY-ID sibling lookup (not positionAmongstSiblings — §9 race;
+              // this exact site produced the recurring smoke-suite
+              // "paste-then-indent misses beta" flake).
               const siblings = await parent.getChildrenRem();
-              const prev = siblings[pos - 1];
+              const idx = siblings.findIndex((s) => s._id === r._id);
+              if (idx <= 0) continue;
+              const prev = siblings[idx - 1];
               if (!prev || prev._id === r._id) continue;
               dest = prev;
               at = (prev.children ?? []).length;
@@ -701,7 +747,7 @@ export class VimAdapter {
             if (!parent || (await parent.isDocument())) continue;
             const grand = await parent.getParentRem();
             if (!grand) continue;
-            const parentPos = (await parent.positionAmongstSiblings()) ?? 0;
+            const parentPos = await this.positionById(parent);
             await r.setParent(grand, parentPos + 1);
           }
         }
@@ -835,7 +881,7 @@ export class VimAdapter {
     const from = this.model?.caret ?? this.lastCaret;
     const len = this.model?.text.length ?? at;
     const to = clamp(at, 0, len);
-    const delta = to - from;
+    const delta = this.model ? stopsBetween(this.model.text, from, to) : to - from;
     if (delta !== 0) {
       await editor.moveCaret(delta, MoveUnit.CHARACTER);
     }
@@ -843,24 +889,47 @@ export class VimAdapter {
   }
 
   /**
-   * Move the real caret to offset `at` via a relative CHARACTER delta from the
-   * model's current position (the one caret primitive RemNote honors).
+   * Move the real caret to offset `at` via a relative delta (in caret STOPS,
+   * see the setCaret case) from the model's current position — the one caret
+   * primitive RemNote honors.
    */
   private async setCaretAbs(at: number, textLen: number) {
     const from = this.model?.caret ?? this.lastCaret;
     const to = clamp(at, 0, textLen);
-    const delta = to - from;
+    const delta = this.model ? stopsBetween(this.model.text, from, to) : to - from;
     if (delta !== 0) {
       await this.plugin.editor.moveCaret(delta, MoveUnit.CHARACTER);
     }
   }
 
-  /** Leaving insert mode: re-read the line, take the real caret if we can. */
+  /**
+   * Leaving insert mode: re-read the line, take the real caret if we can.
+   *
+   * The editor read API lags native typing — a single immediate read after a
+   * fast type-then-Escape can return the line MISSING the last typed
+   * characters, and the truncated model then makes every EOL computation land
+   * a few characters short (the user-reported "cursor believes it is at the
+   * end of line" bug). Read until two consecutive reads agree; if the line
+   * still looks EXACTLY like it did when insert began (either nothing was
+   * typed or the flush hasn't happened yet — indistinguishable), give it one
+   * more, longer-spaced confirmation read.
+   */
   private async reconcileAfterInsert() {
     const pre = this.insertEntryText ?? '';
     this.insertEntryText = null;
-    const rich = await this.plugin.editor.getFocusedEditorText();
-    const fresh = rich ? (await this.plugin.richText.toString(rich)) ?? '' : '';
+    let fresh = await settleRead(() => this.readLine(), (a, b) => a === b);
+    if (fresh === pre) {
+      fresh = await settleRead(() => this.readLine(), (a, b) => a === b, {
+        rounds: 1,
+        delayMs: 120,
+      });
+    }
+    if (fresh == null) {
+      // No focused editor (focus lost mid-insert) — never install an empty
+      // model over a line that still has text; re-read on the next key.
+      this.invalidateModel();
+      return;
+    }
     const doc = hostDocument();
     const domCaret = doc ? readDomCaret(doc) : null;
     const caret = clamp(domCaret ?? diffCaret(pre, fresh, this.model?.caret ?? 0), 0, fresh.length);
@@ -1116,7 +1185,7 @@ export class VimAdapter {
     }
     const last = targets[targets.length - 1];
     const parent = await last.getParentRem();
-    let at = ((await last.positionAmongstSiblings()) ?? 0) + 1;
+    let at = (await this.positionById(last)) + 1;
     let firstId: string | null = null;
     for (const r of targets) {
       const node = await this.captureSubtree(r);
@@ -1793,6 +1862,27 @@ export class VimAdapter {
       if (r) rems.push(r);
     }
     return rems;
+  }
+
+  /**
+   * A rem's position among its siblings, located BY ID in the parent's
+   * children list. `positionAmongstSiblings()` races RemNote's data layer
+   * right after an edit — it can return a stale position or effectively make
+   * a rem its own neighbor (§9; bit joinRem, indentSelection and the smoke
+   * suite's paste-then-indent). Falls back to the racy call only when the
+   * id lookup is impossible (no parent / not yet in the children list).
+   */
+  private async positionById(r: {
+    _id: string;
+    getParentRem: () => Promise<{ getChildrenRem: () => Promise<{ _id: string }[]> } | undefined>;
+    positionAmongstSiblings: () => Promise<number | undefined>;
+  }): Promise<number> {
+    const parent = await r.getParentRem();
+    if (parent) {
+      const idx = (await parent.getChildrenRem()).findIndex((s) => s._id === r._id);
+      if (idx >= 0) return idx;
+    }
+    return (await r.positionAmongstSiblings()) ?? 0;
   }
 
   /** The focused Rem plus up to count-1 following siblings. */

@@ -17,7 +17,7 @@
 # scripts only require a Daily Document and the dev plugin).
 set -euo pipefail
 
-APPIMAGE="${REMNOTE_APPIMAGE:-$(ls -v /home/onegraund/Applications/RemNote-*.AppImage | tail -1)}"
+APPIMAGE="${REMNOTE_APPIMAGE:-$(ls -v "$HOME"/Applications/RemNote-*.AppImage | tail -1)}"
 E2E_HOME="${REMNOTE_E2E_HOME:-/tmp/remnote-vim-e2e-home}"
 PORT="${REMNOTE_CDP_PORT:-9223}"
 

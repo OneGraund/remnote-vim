@@ -15,6 +15,68 @@ export function charClass(ch: string, big: boolean): CharClass {
   return /[A-Za-z0-9_À-ɏ]/.test(ch) ? 1 : 2;
 }
 
+// ---------------------------------------------------------------- code points
+//
+// Offsets are UTF-16 code UNITS (matching both JS strings and RemNote's
+// rich-text offset space, probed live 2026-07-08: emoji = 2 units, atomic
+// elements = 2 units). An astral character occupies two units, and a caret
+// must never land between its surrogate halves: stepping motions and
+// char-granular edits (h/l/x/r/~) move by whole CODE POINTS via the helpers
+// below. RemNote's `moveCaret(n, CHARACTER)` also moves by code points
+// ("caret stops"), so the adapter reuses this math for its relative moves.
+
+/**
+ * The adapter flattens each ATOMIC rich-text element (rem reference, image,
+ * LaTeX, …) to this single astral code point: 2 UTF-16 units — exactly the
+ * width RemNote's offset space gives such elements — but one caret stop and
+ * one "character" to every motion. Rewrite commands (r, ~) refuse ranges
+ * containing it, and pasted text drops it (a chip can't be re-created from
+ * plain text). U+10FFFC is a plane-16 private-use char: it cannot occur in
+ * real user text.
+ */
+export const ATOMIC_CH = '\u{10FFFC}';
+
+const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
+/** Unit width (1 or 2) of the code point starting at unit offset i. */
+export function cpWidthAt(s: string, i: number): number {
+  return isHighSurrogate(s.charCodeAt(i)) && isLowSurrogate(s.charCodeAt(i + 1)) ? 2 : 1;
+}
+
+/** Snap a unit offset to the START of the code point containing it. */
+export function cpStart(s: string, i: number): number {
+  return i > 0 && isLowSurrogate(s.charCodeAt(i)) && isHighSurrogate(s.charCodeAt(i - 1))
+    ? i - 1
+    : i;
+}
+
+/** Advance `count` code points forward from unit offset c (clamps at len). */
+export function cpForward(s: string, c: number, count: number): number {
+  let i = Math.max(0, Math.min(c, s.length));
+  for (let k = 0; k < count && i < s.length; k++) i += cpWidthAt(s, i);
+  return i;
+}
+
+/** Retreat `count` code points back from unit offset c (clamps at 0). */
+export function cpBack(s: string, c: number, count: number): number {
+  let i = Math.max(0, Math.min(c, s.length));
+  for (let k = 0; k < count && i > 0; k++) {
+    i -= 1;
+    i = cpStart(s, i);
+  }
+  return i;
+}
+
+/** Number of code points ("caret stops") in s between unit offsets from..to. */
+export function stopsBetween(s: string, from: number, to: number): number {
+  const lo = Math.max(0, Math.min(from, to));
+  const hi = Math.min(s.length, Math.max(from, to));
+  let stops = 0;
+  for (let i = lo; i < hi; i += cpWidthAt(s, i)) stops++;
+  return to >= from ? stops : -stops;
+}
+
 export interface MotionResult {
   target: number;
   /**
@@ -115,12 +177,43 @@ export function findChar(
     if (i < 0) return null;
     return key === 'f' ? { target: i + 1, landsOn: true } : { target: i, landsOn: false };
   } else {
-    const from = c - 2;
+    // Search strictly before the cursor char at c — so from c-1 inclusive.
+    // (This used to start at c-2 unconditionally, silently missing a match
+    // immediately left of the cursor: `Fb` on "abc" with the caret on 'c'
+    // found nothing.) On a REPEAT (`,` after f/t) the caret sits touching
+    // the previously found char at c-1 — skip it or the repeat re-finds the
+    // same spot and never moves (vim's `;`/`,` rule).
+    let from = c - 1;
+    if (isRepeat && s[c - 1] === ch) from = c - 2;
     if (from < 0) return null;
-    let i = s.lastIndexOf(ch, from);
+    const i = s.lastIndexOf(ch, from);
     if (i < 0) return null;
     return key === 'F' ? { target: i, landsOn: false } : { target: i + 1, landsOn: false };
   }
+}
+
+/**
+ * `[count]f/F/t/T`: apply findChar `count` times, each continuation as a
+ * repeat (so `2fx` lands after the second x and `2tx` before it, with the
+ * adjacent-match skip rules applying between hops). Fails as a whole when
+ * any hop fails — vim's all-or-nothing count semantics.
+ */
+export function findCharCount(
+  s: string,
+  c: number,
+  key: 'f' | 'F' | 't' | 'T',
+  ch: string,
+  count: number,
+  isRepeat = false
+): MotionResult | null {
+  let cur = c;
+  let r: MotionResult | null = null;
+  for (let k = 0; k < count; k++) {
+    r = findChar(s, cur, key, ch, k > 0 ? true : isRepeat);
+    if (!r) return null;
+    cur = r.target;
+  }
+  return r;
 }
 
 /**

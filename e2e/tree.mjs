@@ -30,11 +30,37 @@ for (let i = 0; i < 20 && !page; i++) {
 }
 if (!page) { console.error('✗ RemNote app page not found.'); process.exit(2); }
 
+// RemNote can leave a stuck `pointer-events-none` on the editor (its
+// suppress-mouse-while-typing state never clears if no real pointer enters the
+// window) — every mouse.click would then fall through and focus nothing, so
+// the whole fixture build silently no-ops into a single empty bullet. Strip it,
+// exactly like run.mjs/stress.mjs do.
+await page.evaluate(() =>
+  document.querySelector('.rn-editor-container')?.classList.remove('pointer-events-none'));
 // A freshly launched window swallows synthetic clicks (activeElement stays
 // BODY, no rem ever focuses) until the page is brought to the foreground.
 await page.bringToFront();
 
 const wait = (ms) => page.waitForTimeout(ms);
+// An EMPTY daily document raises RemNote's "Capture & Organize Your Day's
+// Thoughts" template modal, whose dimming backdrop swallows every synthetic
+// click (the §9 daily-template banner). resetEmpty() empties the doc, so it
+// can reappear; dismiss it (click its Close ×) before focusing.
+async function dismissBanner() {
+  for (let i = 0; i < 3; i++) {
+    const closed = await page.evaluate(() => {
+      const heading = [...document.querySelectorAll('*')].find(
+        (e) => e.childElementCount === 0 && /Capture & Organize Your Day/.test(e.textContent || ''));
+      if (!heading) return false;
+      const scope = heading.closest('div[class]')?.parentElement ?? document.body;
+      const btn = [...scope.querySelectorAll('[aria-label]')].find((b) => /close/i.test(b.getAttribute('aria-label') || ''));
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (!closed) return;
+    await page.waitForTimeout(350);
+  }
+}
 const dbg = () => page.evaluate(() => getComputedStyle(document.body, '::before').content.replace(/\\?"/g, ''));
 const badge = () => page.evaluate(() => getComputedStyle(document.body, '::after').content.replace(/\\?"/g, ''));
 async function counters() {
@@ -191,16 +217,19 @@ const texts = async () => (await rows()).map((r) => r.text);
 const shot = (n) => page.screenshot({ path: `${SHOTS}${n}.png` });
 
 async function resetEmpty() {
+  await dismissBanner();
   for (let i = 0; i < 25; i++) {
     const all = await rows();
     const dirty = all.find((b) => b.text !== '');
     if (!dirty) break;
+    await dismissBanner(); // a near-empty doc re-raises it, swallowing clicks
     await page.mouse.click(dirty.x, dirty.y);
     await wait(350);
     if ((await mode()) !== 'NORMAL') { await press('Escape'); await waitIdle(); }
     if (all.length <= 1) { await keys('cc'); await press('Escape'); await waitIdle(); }
     else await keys('dd');
   }
+  await dismissBanner();
   const first = (await rows())[0];
   if (first) { await page.mouse.click(first.x, first.y); await wait(350); }
   if ((await mode()) !== 'NORMAL') { await press('Escape'); await waitIdle(); }

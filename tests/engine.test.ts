@@ -63,11 +63,11 @@ describe('motions', () => {
   it('f/t/, char search (; is the command line, not a repeat)', () => {
     const e = h('hello world');
     e.keys('fo');
-    expect(e.caret).toBe(5); // after the first o
+    expect(e.caret).toBe(4); // ON the first o
     e.keys('fo');
-    expect(e.caret).toBe(8); // after the o in world
+    expect(e.caret).toBe(7); // ON the o in world
     e.keys(',');
-    expect(e.caret).toBe(4); // , reverse-repeats: back before first o
+    expect(e.caret).toBe(4); // , reverse-repeats: back to the first o
     const e2 = h('hello world');
     e2.keys('t ');
     expect(e2.caret).toBe(5); // just before the space
@@ -641,13 +641,24 @@ describe('shift-blind synonyms (live-reachable spellings)', () => {
   it('; opens the command line even after an f find (repeat retired)', () => {
     const e = h('a.b.c');
     e.keys('f.');
-    expect(e.caret).toBe(2);
+    // f lands the cursor ON the found char (index 1), not one past it — the
+    // offset AFTER the char is `findChar`'s inclusive operator-range end, used
+    // only by df/dt. A plain f then x must delete the char it landed on.
+    expect(e.caret).toBe(1);
     e.keys(';');
     expect(e.mode).toBe('command');
     e.keys('<esc>');
     // , still reverse-repeats the find
     e.keys('f.,');
     expect(e.caret).toBe(1);
+  });
+
+  it('f lands ON the char so f<c> then x deletes exactly that char', () => {
+    const e = h('the lazy dog');
+    e.keys('fz');
+    expect(e.caret).toBe(6); // the z in "lazy" (t0 h1 e2 _3 l4 a5 z6)
+    e.keys('x');
+    expect(e.lines[0]).toBe('the lay dog');
   });
 
   it('/ does NOT open the command line (RemNote slash menu owns it)', () => {

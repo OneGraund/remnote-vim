@@ -1,11 +1,17 @@
 import {
-  findChar,
+  ATOMIC_CH,
+  cpBack,
+  cpForward,
+  cpStart,
+  cpWidthAt,
+  findCharCount,
   firstNonBlank,
   nextWordStart,
   numberAt,
   pairObject,
   prevWordStart,
   quoteObject,
+  stopsBetween,
   wordEnd,
   wordObject,
   MotionResult,
@@ -181,12 +187,14 @@ function motionFor(
   });
 
   switch (key) {
+    // h/l step whole CODE POINTS: an astral char (emoji, or the adapter's
+    // atomic-element placeholder) is one caret stop, never half of one.
     case 'h':
     case 'Backspace':
-      return simple(head - count);
+      return simple(cpBack(text, head, count));
     case 'l':
     case ' ':
-      return simple(head + count);
+      return simple(cpForward(text, head, count));
     case '0':
       return simple(0);
     case '^':
@@ -223,7 +231,7 @@ function motionFor(
     case ',': {
       if (!state.lastFind) return null;
       const fk = ({ f: 'F', F: 'f', t: 'T', T: 't' } as const)[state.lastFind.key];
-      const r = findChar(text, head, fk, state.lastFind.ch, true);
+      const r = findCharCount(text, head, fk, state.lastFind.ch, count, true);
       return r ? { result: r } : null;
     }
   }
@@ -276,10 +284,17 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
   if (state.pending.p === 'replace') {
     if (key.length !== 1) return reset(state);
     if (caret >= n) return reset(state);
-    const end = clamp(caret + count, 0, n);
+    // vim: [count]r fails outright when fewer than count chars remain —
+    // no partial replacement. Chars are code points (emoji count as one);
+    // atomic elements (references etc.) can't be rewritten as text.
+    if (stopsBetween(text, caret, n) < count) return reset(state);
+    const end = cpForward(text, caret, count);
+    if (text.slice(caret, end).includes(ATOMIC_CH)) return reset(state);
+    // keepLead: the delete is immediately refilled at the same offset, so the
+    // column-0 whitespace swallow must not fire (`r` on "a b" col 0 keeps " b").
     return reset(state, [
-      { t: 'deleteRange', start: caret, end },
-      { t: 'insertText', at: caret, text: key.repeat(end - caret) },
+      { t: 'deleteRange', start: caret, end, keepLead: true },
+      { t: 'insertText', at: caret, text: key.repeat(count) },
       { t: 'setCaret', at: caret },
     ]);
   }
@@ -287,11 +302,18 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
   if (state.pending.p === 'find') {
     if (key.length !== 1) return reset(state);
     const fk = state.pending.key;
-    const r = findChar(text, caret, fk, key, false);
+    // [count]f/t/F/T finds the count-th occurrence (2fx, d2fx).
+    const r = findCharCount(text, caret, fk, key, count);
     const st = { ...state, lastFind: { key: fk, ch: key } };
     if (!r) return reset(st);
     if (st.op) return applyOperator(st, snap, caret, r.target);
-    return reset(st, [{ t: 'setCaret', at: motionCaret(r) }]);
+    // Plain cursor find must land ON the char, exactly like the visual find
+    // path (vStart). `findChar` reports `f` as the offset AFTER the char (its
+    // inclusive operator-range end, consumed by applyOperator above), so an
+    // on-char cursor is target-1; t/F/T already report an on-char offset
+    // (landsOn:false). Without this, `fz` then `x` deleted the char after z.
+    const at = r.landsOn ? cpStart(text, Math.max(0, r.target - 1)) : r.target;
+    return reset(st, [{ t: 'setCaret', at }]);
   }
 
   if (state.pending.p === 'g') {
@@ -406,7 +428,7 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     case 'i':
       return toMode(state, 'insert', []);
     case 'a':
-      return toMode(state, 'insert', [{ t: 'setCaret', at: clamp(caret + 1, 0, n) }]);
+      return toMode(state, 'insert', [{ t: 'setCaret', at: cpForward(text, caret, 1) }]);
     case 'I':
       return toMode(state, 'insert', [{ t: 'setCaret', at: firstNonBlank(text) }]);
     case 'A':
@@ -421,7 +443,9 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     case 'v':
     case 'V': {
       const r = toMode(state, 'visual', []);
-      const head = clamp(caret, 0, Math.max(0, n - 1));
+      // Head is an ON-char index: snap to the start of the code point so an
+      // astral last char doesn't leave the head between surrogate halves.
+      const head = cpStart(text, clamp(caret, 0, Math.max(0, n - 1)));
       r.state.anchor = head;
       r.state.head = head;
       r.actions.push(selectionAction(r.state, snap));
@@ -431,20 +455,20 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     // --- simple edits
     case 'x': {
       if (caret >= n) return reset(state);
-      const end = clamp(caret + count, 0, n);
+      const end = cpForward(text, caret, count);
       return reset(withCharRegister(state, text.slice(caret, end)), [
         { t: 'deleteRange', start: caret, end, yank: true },
       ]);
     }
     case 'X': {
       if (caret === 0) return reset(state);
-      const start = clamp(caret - count, 0, n);
+      const start = cpBack(text, caret, count);
       return reset(withCharRegister(state, text.slice(start, caret)), [
         { t: 'deleteRange', start, end: caret, yank: true },
       ]);
     }
     case 's': {
-      const end = clamp(caret + count, 0, n);
+      const end = cpForward(text, caret, count);
       const st = end > caret ? withCharRegister(state, text.slice(caret, end)) : state;
       const acts: Action[] =
         end > caret ? [{ t: 'deleteRange', start: caret, end, yank: true, keepLead: true }] : [];
@@ -466,14 +490,17 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     case '`': {
       // backtick doubles as ~ (Shift+` is invisible to the key stealing)
       if (caret >= n) return reset(state);
-      const end = clamp(caret + count, 0, n);
-      const toggled = text
-        .slice(caret, end)
-        .split('')
+      // Whole code points (an emoji toggles to itself, but must never be
+      // split); atomic elements can't be rewritten as text — refuse, like r.
+      const end = cpForward(text, caret, count);
+      const slice = text.slice(caret, end);
+      if (slice.includes(ATOMIC_CH)) return reset(state);
+      const toggled = [...slice]
         .map((ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()))
         .join('');
+      // keepLead: delete-then-refill at the same offset (see `r`).
       return reset(state, [
-        { t: 'deleteRange', start: caret, end },
+        { t: 'deleteRange', start: caret, end, keepLead: true },
         { t: 'insertText', at: caret, text: toggled },
       ]);
     }
@@ -489,7 +516,7 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       }
       const txt = state.register.text.repeat(count);
       // vim: p pastes after the character under the cursor, P before it
-      const at = key === 'p' ? clamp(caret + 1, 0, n) : caret;
+      const at = key === 'p' ? cpForward(text, caret, 1) : caret;
       return reset(state, [{ t: 'insertText', at, text: txt }]);
     }
     case 'Y':
@@ -660,18 +687,18 @@ function applyOperator(state: VimState, snap: Snapshot, from: number, to: number
 
 // ---------------------------------------------------------------- visual
 
+// The selection covers the WHOLE code point the head sits on (an astral char
+// or atomic-element placeholder is 2 units wide — hi+1 would cut it in half).
 function selectionAction(state: VimState, snap: Snapshot): Action {
-  const n = snap.text.length;
-  const lo = Math.min(state.anchor, state.head);
-  const hi = Math.max(state.anchor, state.head);
-  return { t: 'select', start: lo, end: clamp(hi + 1, 0, Math.max(n, lo)) };
+  const { start, end } = visualRange(state, snap);
+  return { t: 'select', start, end };
 }
 
 function visualRange(state: VimState, snap: Snapshot): { start: number; end: number } {
   const n = snap.text.length;
   const lo = Math.min(state.anchor, state.head);
   const hi = Math.max(state.anchor, state.head);
-  return { start: lo, end: clamp(hi + 1, 0, Math.max(n, lo)) };
+  return { start: lo, end: clamp(hi + cpWidthAt(snap.text, hi), 0, Math.max(n, lo)) };
 }
 
 function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResult {
@@ -698,7 +725,7 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
       return r;
     }
     if (key === 'l' || key === 'h') {
-      const target = key === 'l' ? Math.max(0, n - 1) : firstNonBlank(text);
+      const target = key === 'l' ? cpStart(text, Math.max(0, n - 1)) : firstNonBlank(text);
       const st2 = { ...st, head: clamp(target, 0, Math.max(0, n - 1)) };
       return { state: st2, actions: [selectionAction(st2, snap)] };
     }
@@ -727,11 +754,12 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
 
   if (state.pending.p === 'find') {
     const fk = state.pending.key;
-    const r = key.length === 1 ? findChar(text, state.head, fk, key, false) : null;
+    const r =
+      key.length === 1 ? findCharCount(text, state.head, fk, key, countOf(state)) : null;
     const st: VimState = { ...state, pending: { p: 'none' }, count: '' };
     if (!r) return { state: st, actions: [] };
     st.lastFind = { key: fk, ch: key };
-    st.head = clamp(r.landsOn ? r.target - 1 : r.target, 0, Math.max(0, n - 1));
+    st.head = cpStart(text, clamp(r.landsOn ? r.target - 1 : r.target, 0, Math.max(0, n - 1)));
     return { state: st, actions: [selectionAction(st, snap)] };
   }
 
@@ -745,7 +773,11 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
     const st: VimState = { ...state, pending: { p: 'none' }, count: '' };
     const obj = key.length === 1 ? textObjectFor(text, st.head, key, around) : null;
     if (!obj || obj.end <= obj.start) return { state: st, actions: [] };
-    const st2 = { ...st, anchor: obj.start, head: clamp(obj.end - 1, 0, Math.max(0, n - 1)) };
+    const st2 = {
+      ...st,
+      anchor: obj.start,
+      head: cpStart(text, clamp(obj.end - 1, 0, Math.max(0, n - 1))),
+    };
     return { state: st2, actions: [selectionAction(st2, snap)] };
   }
   if (key === 'i' || key === 'a') {
@@ -754,19 +786,20 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
 
   const m = motionFor(state, key, snap, state.head);
   if (m && !m.vertical) {
-    let target = m.result.landsOn ? m.result.target - 1 : m.result.target;
+    const onChar = (t: number) => cpStart(text, clamp(t, 0, Math.max(0, n - 1)));
+    let target = m.result.landsOn ? onChar(m.result.target - 1) : m.result.target;
     // Inclusive motions measure from an I-beam caret, but the visual head is
     // an ON-char index — when the head already sits on a word's last char,
     // `e` reports that same char and the selection would never grow. Rerun
     // the motion from one char later (vim's "must land later" block-cursor
     // rule applies here, unlike in normal mode).
-    if (m.result.landsOn && target === state.head && state.head + 1 < n) {
-      const m2 = motionFor(state, key, snap, state.head + 1);
+    if (m.result.landsOn && target === state.head && cpForward(text, state.head, 1) < n) {
+      const m2 = motionFor(state, key, snap, cpForward(text, state.head, 1));
       if (m2 && !m2.vertical) {
-        target = m2.result.landsOn ? m2.result.target - 1 : m2.result.target;
+        target = m2.result.landsOn ? onChar(m2.result.target - 1) : m2.result.target;
       }
     }
-    const st = { ...state, head: clamp(target, 0, Math.max(0, n - 1)), count: '' };
+    const st = { ...state, head: onChar(target), count: '' };
     return { state: st, actions: [selectionAction(st, snap)] };
   }
   if (m && m.vertical) {

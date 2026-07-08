@@ -23,10 +23,11 @@
   "scripts": {
     "check-types": "tsc",
     "dev": "NODE_ENV=development webpack-dev-server --color --no-open",
-    "build": "rm -rf dist && NODE_ENV=production webpack --color && cd dist && zip -r ../PluginZip.zip .",
+    "build": "rm -rf dist PluginZip.zip && NODE_ENV=production webpack --color && cd dist && zip -r ../PluginZip.zip .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/run.mjs",
+    "e2e:reallife": "node e2e/reallife.mjs"
   },
   "dependencies": {
     "@remnote/plugin-sdk": "^0.0.46",

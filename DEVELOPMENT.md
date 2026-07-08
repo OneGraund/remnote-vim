@@ -15,12 +15,201 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — Stability pass live-verified + committed; real-life e2e suite added; f-motion off-by-one FIXED
+
+Picked up the mid-verification handoff below and closed it out. **Everything
+committed.** Live state at end of session: unit **352/352**, `tsc` clean,
+smoke **16/16**, stress **57/57**, formatting **5/5**, tree **24/26**,
+real-life **31/34 (0 violations, 3 documented known-issues)**. App on CDP 9223,
+daily doc jB3hgL swept clean.
+
+**Handoff checklist — all done:** smoke 16/16 (the first few `null` reads on a
+cold boot were the daily-template banner, see below — a re-run was clean);
+stress 57/57; formatting 5/5 on the FINAL bundle (proves the by-id batch didn't
+disturb the offset/EOL paths); tree runs again (was silently building `[""]`).
+
+**Root cause of the §9 "cold-boot click-swallow":** it is the **daily-template
+modal** — an EMPTY daily document raises RemNote's "Capture & Organize Your
+Day's Thoughts" banner, whose dimming backdrop swallows every synthetic click
+(activeElement stays BODY, no rem focuses). It reappears whenever a suite
+empties the doc. Fix: `dismissBanner()` (click its Close ×) — added to
+`reallife.mjs` and `tree.mjs`, called up-front and inside `resetEmpty`'s loop.
+tree.mjs also gained the `pointer-events-none` strip run.mjs/stress.mjs have.
+(run.mjs/stress.mjs happened not to hit the banner this session; add
+dismissBanner there too if they do.)
+
+**NEW real-life e2e suite (`e2e/reallife.mjs`, `npm run e2e:reallife`).** The
+old suites drive tiny fixtures; this one mirrors real usage — long prose lines
+(~110 chars, bulk-typed) and many bullets (18). Three phases: (1) long-line
+motion/edit fidelity, (2) many-bullet bulk visual cut/paste + `:g` + `:sort`,
+(3) a realistic nested outline. It caught **three genuine bugs** on its first
+run (details below); phase 1 (which re-verifies the stability pass's offset/EOL
+class on long lines) is **green**.
+
+**BUG FIXED — plain `f` cursor motion off-by-one** (found by reallife phase 1;
+engine, unit-tested, live-verified). A plain `fz` landed the caret ONE PAST the
+char (`findChar` returns the offset AFTER the char — its inclusive
+operator-range end, used by `df`), so `fz` then `x` deleted the char after `z`.
+The **visual** find path already did `landsOn ? target-1 : target` (engine.ts
+vStart); the **normal** path (the `pending:'find'` branch) used `motionCaret(r)`
+= `r.target` and forgot it. Fix mirrors the visual path inline. Three existing
+unit tests had pinned the buggy `i+1` caret (they were written to match the
+impl) — corrected, plus a new `fz`→`x` engine test. Live: `fz x` on
+"the lazy dog" → "the lay dog". **352/352.**
+
+**Open findings (pre-existing, NOT stability-pass regressions — their code paths
+weren't touched; marked `known` in reallife.mjs so the suite is green):**
+1. **`:sort` does not reorder** — runs but `sortBullets`'
+   `setParent(parent, index)` does not move same-parent children (reproduced
+   with a correctly-focused parent AND with a visual selection; `trail:4
+   units:4` confirmed the selection was intact). The handoff's "✅ :sort" was
+   likely a run-check, not an order-check.
+2. **`vvd` on a parent with SEVERAL children** clears the parent's text but
+   leaves the children — the subtree is not cut. The single-child case works
+   (stress phase 5), so it's child-count/structure specific.
+3. **tree.mjs 2 stable checks** (unchanged this session): `anchor tint` ([] vs
+   the g1 anchor — first-step tint read) and the outdent→indent round-trip
+   (`E:asdf` re-indents under `tail`, not `Empty Bullet` — outdent lands it at
+   the doc end). Worth a look; the CORE cross-parent selection bug the suite
+   exists for still passes 24/26.
+
+Next session: decide whether to fix findings 1/2 (both are real user-facing).
+
+### 2026-07-08 — HANDOFF mid-verification: stability pass (rich-text offset space, insert-exit race, code-point safety); unit suite 153 → 351
+
+**⚠ Read this first — session ended on an account switch with live
+verification INCOMPLETE and NOTHING COMMITTED.** All code changes below are
+in the working tree only (alongside the earlier uncommitted OSS-prep tweaks
+to e2e/launch.sh, package.json and webpack.config.js). State at handoff:
+unit **351/351**, `tsc` clean; targeted live probes **5/5** (but against the
+bundle from *before* the last change batch — see below); smoke **not green
+on the final bundle yet** (details in the checklist).
+
+**Environment at handoff:** e2e app RUNNING on CDP 9223 with the current
+bundle (relaunched after the last code change); webpack dev on 8080 serving
+current code. Daily doc may hold probe leftovers — `e2e/formatting.mjs`
+cleans up after itself, but double-check.
+
+**Next account's checklist (in order):**
+
+1. **Re-run smoke**: `REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 npm run e2e`.
+   The one run against the final bundle came back with the FIRST few checks
+   reading `null` (`h`/`x`/`0 l` — `readOwn()` got no focused rem), which is
+   the §9 cold-boot click-swallow/banner class, not obviously a code bug
+   (those checks touch none of the changed positional code, and the same
+   steps passed 15/16 on the previous bundle — the single failure there was
+   the known `v j .` indent race, which the by-id fix below addresses).
+   If nulls recur: bring the window to the compositor foreground, dismiss
+   the daily-template banner, retry. Expect **16/16 including `v j .`**.
+2. **Run stress**: `REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 node
+   e2e/stress.mjs` (expect 57/57). NOT run at all this session.
+3. **Re-run the formatting probes on the current bundle**:
+   `REMNOTE_CDP_PORT=9223 node e2e/formatting.mjs` (new script, expect 5/5).
+   It passed 5/5 against the bundle WITHOUT the positionById batch; the
+   by-id changes shouldn't affect those paths, but prove it.
+4. **Run `node e2e/tree.mjs`** — indentSelection/outdentSelection were
+   touched (by-id lookups); tree.mjs is the precision test for that area.
+5. **Commit** (single commit is fine; the working tree also carries the
+   morning's OSS-prep tweaks — keep or split at your discretion).
+
+User report driving this pass: the cursor sometimes believes it is at the
+end of the line while characters remain; general instability on longer/
+formatted lines. All root causes were found and fixed; unit-tested, and the
+formatting/EOL fixes were live-verified via scripted probes (5/5).
+
+**Root causes (probed live via sdk-repl on RemNote 1.26.30 — all three are
+new §9 entries, read those before touching the model):**
+
+1. **The formatting bug — `richText.toString` is NOT offset-safe.** The model
+   text came from `richText.toString`, which expands a rem reference to its
+   full display name. RemNote's REAL offset space (what `selectText` ranges
+   and `getSelection().range` are measured in — probed live) counts text as
+   UTF-16 units and every atomic element (reference/image/LaTeX/…) as exactly
+   **2 units**: a line `["see ", {i:'q',…}, " end"]` is 10 units, while
+   toString gave 23 chars. Every motion/delete right of a reference hit the
+   wrong characters, and EOL computations were off by name-length−2.
+   **Fix:** new pure `flattenRich()` (`src/adapter/pure.ts`) — text elements
+   keep their chars, every atomic element becomes ONE astral placeholder
+   (`ATOMIC_CH` U+10FFFC = 2 units, 1 code point), so model length ===
+   RemNote's unit space by construction. Also removes an async host RPC from
+   the snapshot hot path.
+2. **`moveCaret(n, CHARACTER)` moves n caret STOPS, not units** — one stop
+   per code point, one per whole atomic element (probed: a single +1 crossed
+   a 2-unit reference chip; emoji ditto). Relative caret deltas computed as
+   unit differences over-shot on any line with a chip or emoji. **Fix:** all
+   relative moves (`setCaret`/`collapseSelection`/`insertAt`/`setCaretAbs`)
+   convert unit offsets to stop deltas via `stopsBetween()` (motions.ts).
+   The astral placeholder makes code-point counting handle chips and emoji
+   uniformly.
+3. **The EOL bug — insert-exit read race.** `reconcileAfterInsert()` read
+   `getFocusedEditorText()` once, immediately on Escape; the read API lags
+   native typing, so fast type-then-Escape installed a TRUNCATED line as the
+   model — every later EOL computation landed a few chars short (exactly the
+   user's report). **Fix:** `settleRead()` (pure.ts) — re-read until two
+   consecutive reads agree, plus an extra longer-spaced confirmation when the
+   line looks identical to insert-entry (ambiguous: nothing typed vs. flush
+   pending). Also: a null read (focus lost) now invalidates the model instead
+   of installing '' (previously poisoned every following key), and snapshot()
+   re-syncs after SDK text mutations (`joinRem`/undo/redo/`runEx` mark the
+   model **dirty**) also go through settleRead.
+
+**Engine fixes (all pure, all unit-tested):**
+
+- **Code-point safety**: h/l/x/X/s/r/`~`/a/charwise-p and visual boundaries
+  step whole code points (new `cpForward`/`cpBack`/`cpStart`/`cpWidthAt`);
+  previously `x` on an emoji deleted HALF the surrogate pair (lone-surrogate
+  corruption). Visual ranges cover the full code point under the head.
+- **Atomic-element semantics**: `x`/`d` across a chip delete it cleanly
+  (native cut keeps clipboard fidelity); `r`/`~` REFUSE ranges containing a
+  chip (rewriting one as text would corrupt it); text inserted from charwise
+  registers strips placeholders (a chip can't be recreated from plain text —
+  documented limitation; line registers dd/yy keep full rich fidelity).
+- **`F`/`T` off-by-one**: backward find started at c−2, silently missing a
+  match immediately left of the cursor (`Fb` on "abc" with caret on c found
+  nothing). Now c−1, with the adjacent-match skip only on `,`-repeats.
+- **`[count]f/t/F/T` implemented** (`2fx`, `d2fx`) — counts were silently
+  ignored on find motions; all-or-nothing like vim. Applies in normal,
+  operator and visual contexts, and to `,` reverse-repeat.
+- **`r` overflow**: `5rz` with 3 chars left now fails outright (vim), no
+  partial replace. `r`/`~` also set `keepLead` — at column 0 they no longer
+  swallowed the whitespace after the replaced char (`rx` on "a b" gave "xb",
+  now "x b").
+- **`positionAmongstSiblings` fully retired from mutation paths** (§9 race,
+  had recurred in the smoke suite's paste-then-indent as predicted by the
+  night entry): `indent`/`outdent`/`indentSelection`/`outdentSelection`/
+  `newBullet`/`pasteRem`/`:t` now locate neighbors BY ID via
+  `getChildrenRem().findIndex` (new `positionById` helper; falls back to the
+  racy call only when the id lookup is impossible).
+
+**Tests: 153 → 351** (`npm test`, all green, tsc clean). New files:
+`tests/motions.test.ts` (78 — direct pure-function coverage of every motion
+helper incl. the new code-point math), `tests/engine-edge.test.ts` (91 —
+EOL/empty-line matrices, emoji, atomic placeholders, count edges, operator
+aborts, dot-repeat interplay, multi-line stability), `tests/adapter-pure.test.ts`
+(29 — flattenRich offset-space contract, sanitizeInsert, diffCaret table,
+settleRead convergence). Harness mirrors the placeholder-strip in insertText.
+
+**Live verification so far** (see the handoff checklist above for what
+remains): scripted probes (`e2e/formatting.mjs`) **5/5** — `ga`+type+Esc on
+a reference line appends at the TRUE end; `0wx` deletes exactly the chip;
+`fm dw` right of a chip hits the exact chars; `0lx` deletes a whole emoji;
+fast-type+instant-Esc+`h x` lands on the right char. Those ran against the
+bundle WITHOUT the positionById batch; smoke on the previous bundle was
+15/16 (failure = the known `v j .` indent race that motivated that batch).
+The offset-space facts themselves (atomics = 2 units, moveCaret = stops)
+were probed directly via sdk-repl before any code was written.
+
+**Contract changes for anyone rebasing:** engine text may contain
+`ATOMIC_CH` (U+10FFFC, one per atomic rich element — 2 UTF-16 units); the
+`insertText` action strips it on execution (adapter + harness); `diffCaret`
+moved to `src/adapter/pure.ts` (re-exported from adapter.ts).
+
 ### 2026-07-08 — open-source readiness pass (docs/metadata only; no engine changes)
 
 Prepped the repo to be published publicly and submitted to the RemNote Plugin
 Store. **No source touched** — engine/adapter untouched, unit 153/153, `tsc`
-clean. Added: `LICENSE` (MIT, © onegraund — user chose the handle over their
-legal name), `CONTRIBUTING.md`, `.github/workflows/ci.yml` (check-types + unit
+clean. Added: `LICENSE` (MIT, © onegraund — the project's chosen handle),
+`CONTRIBUTING.md`, `.github/workflows/ci.yml` (check-types + unit
 tests + prod build; e2e stays local-only), issue/PR templates, and
 `e2e/.env.example`. Rewrote `README.md` to be user-first (install, Shift-blind
 synonym table, full keybinding + Ex cheat sheet, Known limitations, a Privacy
@@ -29,9 +218,9 @@ Enriched `package.json` metadata (author/description/repository/bugs/keywords;
 kept `private:true`). manifest.json already had the required `repoUrl`/author.
 **Not done (user's call, needs their hands):** create+push the GitHub repo,
 `npm run build`, upload the zip via Settings→Plugins→Build→Upload. Privacy
-caveat surfaced to user: commit author email in `.gitconfig` is the student
-address (`e12133647@student.tuwien.ac.at`) — it will be public on push and
-partly defeats the handle-only choice; suggested GitHub noreply email.
+caveat surfaced to user: the commit author email in `.gitconfig` is a
+personal address that would be public on push and partly defeats the
+handle-only choice; suggested a GitHub noreply email instead.
 
 ### 2026-07-08 night — handoff closed: gj/:g/:marks/:help all live-verified; every suite green; stress c-e wedge fixed
 
@@ -557,14 +746,16 @@ Engine/adapter contract changes in this batch (for anyone rebasing):
 ## 0.5 Feature status (what works live)
 
 Formerly VIM_STATUS.md; trimmed to what a contributor needs. Engine suite:
-**153/153** unit tests green (run `npm test` — don't trust this number, verify).
+**351/351** unit tests green (run `npm test` — don't trust this number, verify).
 
 Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
 
 - **Modes** — `i` insert / `Esc` normal / `v` charwise visual / `vv`
   visual-line (`v`+`j/k` auto-upgrades) / `;` `/` `:` command line; mode badge
   bottom-right; per-mode key stealing (insert releases everything but Esc).
-- **Motions** — `h l 0 w b e f<c> t<c>` `,`(reverse find repeat), counts;
+- **Motions** — `h l 0 w b e f<c> t<c>` `,`(reverse find repeat), counts
+  (incl. `[count]f/t`, e.g. `2fx`, `d2fx`); code-point safe (emoji and
+  atomic elements are one character to every motion/edit);
   g-chords for shift-blind capitals: `gl`=`$` `gh`=`^` `gg` `ge`=`G`
   `ga`=`A` (append at line end).
   `e` uses I-beam semantics (any forward progress counts), so `de` on
@@ -625,6 +816,11 @@ Known limitations (beyond §9 platform blockers):
 
 - Caret column desyncs after an intra-line mouse click (collapsed caret is
   unreadable in the sandbox); re-anchor with `0`/`gl` or enter+leave insert.
+- Charwise registers drop atomic elements: `x`/`dw` across a reference/
+  image/LaTeX chip deletes it correctly (and the native clipboard keeps full
+  fidelity), but `p` pastes the text minus the chip — a chip can't be
+  recreated from plain text. Whole-line registers (`dd`/`yy`/visual-line)
+  keep full rich fidelity. `r`/`~` refuse ranges containing a chip.
 - Charwise visual uses a real native text selection, so RemNote's floating
   formatting toolbar pops up over it (harmless; keys keep working).
 - Capitals act as their lowercase key (shift-blind stealing); use synonyms.
@@ -1049,6 +1245,26 @@ not pick up rebuilds; `pkill -f 'remote-debugging-port=9223'` and relaunch.
 What's actually enforced in code you'll touch (all verified empirically
 against RemNote 1.26.30):
 
+- **The rich-text offset space is UTF-16 code units with every ATOMIC
+  element = exactly 2 units** (probed live 2026-07-08: `editor.selectText`
+  ranges and `getSelection().range`; `richText.length` agrees). A rem
+  reference, image or LaTeX chip is 2 units regardless of its display text.
+  **`richText.toString` is NOT offset-safe** — it expands a reference to its
+  full display name — never use it to build text the engine computes offsets
+  against; `flattenRich()` (src/adapter/pure.ts) is the offset-safe flatten
+  (atomics become the 2-unit/1-code-point placeholder `ATOMIC_CH`).
+- **`moveCaret(n, MoveUnit.CHARACTER)` moves n caret STOPS, not units** —
+  one stop per code point and one per whole atomic element (probed live: a
+  single +1 crossed a 2-unit reference chip; same for emoji). Any relative
+  caret move must convert unit offsets to stops (`stopsBetween()` in
+  motions.ts); a raw unit delta over-shoots on chip/emoji lines.
+- **`getFocusedEditorText()` lags native typing** — an immediate read on
+  insert-exit can return the line missing the last typed characters, and an
+  immediate read after an SDK `setText`-style mutation can return the
+  pre-mutation text. Never trust a single read at those boundaries; use
+  `settleRead()` (two consecutive agreeing reads) like
+  `reconcileAfterInsert`/`snapshot()` do. A null read means "no focused
+  editor" and must never be cached as an empty line.
 - **Key stealing is SHIFT-BLIND.** The steal matcher reports the bare key
   regardless of Shift, and `shift+…` specs never match at all (probed live:
   with only `shift+v` stolen, neither `v` nor `V` is captured; with `v`

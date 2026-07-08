@@ -1,4 +1,5 @@
 import { handleKey, initialState } from '../src/engine/engine';
+import { ATOMIC_CH } from '../src/engine/motions';
 import { Action, Snapshot, VimState } from '../src/engine/types';
 
 interface DocState {
@@ -185,9 +186,12 @@ export class Harness {
         this.clipboard = a.text;
         break;
       case 'insertText': {
+        // Mirror the adapter: atomic-element placeholders are stripped from
+        // text inserted as plain text (they can't recreate the element).
+        const ins = a.text.split(ATOMIC_CH).join('');
         const l = this.line;
-        this.lines[this.row] = l.slice(0, a.at) + a.text + l.slice(a.at);
-        this.caret = a.at + a.text.length;
+        this.lines[this.row] = l.slice(0, a.at) + ins + l.slice(a.at);
+        this.caret = a.at + ins.length;
         this.sel = null;
         break;
       }

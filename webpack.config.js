@@ -76,7 +76,12 @@ const config = {
       raw: true,
     }),
     new CopyPlugin({
-      patterns: [{ from: 'public', to: '' }],
+      // public/ holds manifest.json; RemNote's plugin store also requires a
+      // README.md in the zip root, so bundle the repo's root README too.
+      patterns: [
+        { from: 'public', to: '' },
+        { from: 'README.md', to: '' },
+      ],
     }),
   ].filter(Boolean),
 };
