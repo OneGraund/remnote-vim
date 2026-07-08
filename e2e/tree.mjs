@@ -30,6 +30,10 @@ for (let i = 0; i < 20 && !page; i++) {
 }
 if (!page) { console.error('✗ RemNote app page not found.'); process.exit(2); }
 
+// A freshly launched window swallows synthetic clicks (activeElement stays
+// BODY, no rem ever focuses) until the page is brought to the foreground.
+await page.bringToFront();
+
 const wait = (ms) => page.waitForTimeout(ms);
 const dbg = () => page.evaluate(() => getComputedStyle(document.body, '::before').content.replace(/\\?"/g, ''));
 const badge = () => page.evaluate(() => getComputedStyle(document.body, '::after').content.replace(/\\?"/g, ''));

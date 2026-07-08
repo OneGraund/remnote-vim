@@ -15,6 +15,53 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 night — handoff closed: gj/:g/:marks/:help all live-verified; every suite green; stress c-e wedge fixed
+
+Picked up the evening handoff below; **all five open items are resolved**.
+Suite state at end of session: unit **153/153**, `tsc` clean, smoke
+**16/16**, stress **57/57** (was 59 — see below), real-input **8/8**
+(now proves real Ctrl+A/Ctrl+X delivery, the handoff's open question).
+App relaunched on CDP 9223 with the current bundle; daily doc left as a
+single empty bullet (suites swept it).
+
+- ☑ **`gj` re-verified on the fixed bundle** — fixture
+  `jtest > [one>[kid1], two>[kid2], three, four]`, focus `one`: `gj` →
+  `"one two"` (NO self-join — the positionAmongstSiblings race fix holds),
+  then `.` (dot-repeat, full-speed replay of exactly the racy path) →
+  `"one two three"`. Children adopted in order `[kid1, kid2]`, `four`
+  untouched, UI clean (no zombie rows). Data layer + screenshot verified.
+- ☑ **`:g/tmp/d` live-verified** typed through the real command line
+  (`;g/tmp/d<cr>`): fixture `tmp solo`, `tmp parent>[inner keep,
+  tmp covered]`, `survivor`. Both units deleted, the matching parent took
+  its whole subtree, the covered child was NOT double-deleted (ancestor
+  dedup works), `survivor` intact, toast "2 bullets deleted", OS clipboard
+  got both units with the subtree nested (`clip:native`).
+- ☑ **`:marks` toast verified** — "Marks: a → gamma | b → zeta" after
+  `ma`/`mb` on two bullets.
+- ☑ **`:help` sheet eyeballed** (3 screenshots in e2e/shots/help-*.png):
+  ga row, full Marks section (`m·`/`'·`/`''`/`:marks`), dib/gj/Ctrl-a/
+  Ctrl-x/`.` rows, expanded Command line section (`:s`, `:vs`/`:sp`,
+  `:q`/`:only`, `:sort`, `:t`/`:d`/`:y`, `:g/x/d`, `:e`, `:w`), and the
+  RemNote-differences footer all render correctly.
+- ☑ **FIX (user-reported): stress.mjs pressed `<c-e>`/`<c-y>`**, which the
+  plugin deliberately does not steal (engine.ts: no view-scroll API) — the
+  presses leaked to RemNote where **Ctrl+E opens the audio-embed widget**
+  on the empty scratch bullet and wedged later cases. Steps removed (same
+  treatment as the c-o/c-i drop in 81134a8); stress is now **57 steps**.
+  §9 gained a bullet.
+- ☑ **New harness gotcha found + fixed in all suites**: a freshly launched
+  window **swallows synthetic CDP clicks until `page.bringToFront()`** —
+  activeElement stays BODY, no rem focuses, keys still reach the steal, so
+  everything silently no-ops. run/stress/tree.mjs now call it after
+  connect; §9 gained a bullet. (This is why the first gj probe "failed".)
+- Flake note: first smoke run after cold boot came in 15/16 — the
+  `v j .` indent check hit the known §9 positionAmongstSiblings race
+  (alpha reparented, beta missed); clean 16/16 on the next two runs.
+  Not a regression; indentSelection may deserve the same by-id fix as
+  joinRem if it recurs.
+- Remaining optional follow-ups (unchanged from the evening entry):
+  `:sort u` semantics, visual-mode dot-repeat, `d'a` delete-to-mark.
+
 ### 2026-07-08 evening — HANDOFF: new feature batch (marks, text objects, gj/ga, C-a/C-x, dot-repeat, 6 new Ex verbs)
 
 Read this first. A large feature batch is **committed, 153/153 unit-green,
@@ -490,7 +537,7 @@ Engine/adapter contract changes in this batch (for anyone rebasing):
 ## 0.5 Feature status (what works live)
 
 Formerly VIM_STATUS.md; trimmed to what a contributor needs. Engine suite:
-**115/115** unit tests green (run `npm test` — don't trust this number, verify).
+**153/153** unit tests green (run `npm test` — don't trust this number, verify).
 
 Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
 
@@ -512,7 +559,7 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
 - **`gj`** = vim `J`: join the next sibling bullet (space-separated, its
   children adopted; counts: `3gj`).
 - **`C-a`/`C-x`** — increment/decrement the number under/after the cursor,
-  with counts (CDP-verified; real-keyboard delivery pending real-input run).
+  with counts (CDP- and real-keyboard-verified, real-input.mjs 2026-07-08).
 - **Dot-repeat `.`** — repeats the last completed normal-mode change (`dw`,
   `3x`, `r<c>`, `p`, `gj`, `C-a`…). Changes that enter insert mode (`cw`,
   `o`) are NOT recorded — inserted text never reaches the engine.
@@ -545,11 +592,10 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   §9); `:vsplit`/`:split`/`:q`/`:only` pane management (undocumented
   `window.setRemWindowTree` RPC; focus follows vim semantics — new pane on
   split, survivor on `:q`); Tab-cycled **wildmenu** of command suggestions
-  with live (deduped) `:e`/`:vs`/`:sp` document search. All live-verified
-  2026-07-08. **Added the same evening** (verification state in the §0
-  handoff table): `:sort [n] [rev]` (selection siblings or focused bullet's
-  children), `:t`/`:co[py]` duplicate, `:d`/`:y` delete/yank bullets (register
-  + OS clipboard like dd/yy), `:g/pat/d` global delete, `:marks`.
+  with live (deduped) `:e`/`:vs`/`:sp` document search; `:sort [n] [rev]`
+  (selection siblings or focused bullet's children), `:t`/`:co[py]`
+  duplicate, `:d`/`:y` delete/yank bullets (register + OS clipboard like
+  dd/yy), `:g/pat/d` global delete, `:marks`. All live-verified 2026-07-08.
 - **New bullets** — `o`/`go`(=`O`) always create a *sibling* (never a child).
 - **Cursor visibility** — cursorline row tint + colored left caret bar
   outside insert mode.
@@ -1090,6 +1136,17 @@ against RemNote 1.26.30):
   than a user-facing one). All CDP clicks then fall through to `<html>` and
   focus nothing. The e2e suites strip the class at startup; do the same in
   manual sessions if clicks mysteriously no-op.
+- **A freshly launched window swallows synthetic CDP clicks until
+  `page.bringToFront()`** (found 2026-07-08 night, cost a full debug loop):
+  clicks dispatch fine but `document.activeElement` stays `BODY` and no rem
+  ever focuses, while keystrokes still reach the key steal (rx increments) —
+  so rem-targeted commands silently no-op. All suites now call
+  `bringToFront()` right after connecting; do the same in ad-hoc scripts.
+- **RemNote's own Ctrl+E opens the audio-embed widget** (on an empty bullet
+  it renders the "Insert an Audio URL" box and wedges the doc for e2e).
+  The plugin deliberately does NOT steal Ctrl+E/Ctrl+Y (no view-scroll API,
+  see engine.ts), so never press them in suites — stress.mjs dropped its
+  `<c-e>`/`<c-y>` steps for exactly this reason (user-reported wedge).
 
 ## 10. Build & release
 

@@ -56,7 +56,7 @@ async function waitMode(t, timeout = 4000) {
 }
 const press = (k) => page.keyboard.press(k, { delay: 10 });
 async function keys(seq) {
-  const map = { esc: 'Escape', cr: 'Enter', bs: 'Backspace', space: 'Space', 'c-r': 'Control+r', 'c-d': 'Control+d', 'c-u': 'Control+u', 'c-e': 'Control+e', 'c-y': 'Control+y' };
+  const map = { esc: 'Escape', cr: 'Enter', bs: 'Backspace', space: 'Space', 'c-r': 'Control+r', 'c-d': 'Control+d', 'c-u': 'Control+u' };
   let i = 0;
   while (i < seq.length) {
     if (seq[i] === '<') { const j = seq.indexOf('>', i); await press(map[seq.slice(i + 1, j).toLowerCase()]); i = j + 1; }
@@ -75,6 +75,9 @@ console.log('· stress test scoped to daily doc', DOC_ID);
 // the matching note in run.mjs; without this every mouse.click can no-op.
 await page.evaluate(() =>
   document.querySelector('.rn-editor-container')?.classList.remove('pointer-events-none'));
+// A freshly launched window swallows synthetic clicks (activeElement stays
+// BODY, no rem ever focuses) until the page is brought to the foreground.
+await page.bringToFront();
 
 async function scopedBullets() {
   return page.evaluate(({ docId, pane }) => {
@@ -272,8 +275,9 @@ await step('open cmdline again', ';');
 await step('cancel', '<esc>');
 await step('half page down', '<c-d>');
 await step('half page up', '<c-u>');
-await step('line down', '<c-e>');
-await step('line up', '<c-y>');
+// Ctrl-E/Ctrl-Y deliberately NOT pressed: the plugin doesn't steal them
+// (engine.ts — no view-scroll API), so they leak to RemNote where Ctrl-E
+// opens the audio-embed widget on an empty bullet and wedges the doc.
 
 console.log('· phase 9: rapid mixed sequence (no assertions, must not wedge)');
 await resetEmpty();
