@@ -308,10 +308,11 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     if (!r) return reset(st);
     if (st.op) return applyOperator(st, snap, caret, r.target);
     // Plain cursor find must land ON the char, exactly like the visual find
-    // path (vStart). `findChar` reports `f` as the offset AFTER the char (its
-    // inclusive operator-range end, consumed by applyOperator above), so an
-    // on-char cursor is target-1; t/F/T already report an on-char offset
-    // (landsOn:false). Without this, `fz` then `x` deleted the char after z.
+    // path. The forward finds (f, t) report `target` as the offset AFTER the
+    // landed-on char (the inclusive operator-range end consumed by
+    // applyOperator above), so the on-char cursor is target-1; F/T already
+    // report an on-char offset (landsOn:false). Without this, `fz` then `x`
+    // deleted the char after z, and `tx` then `x` deleted the x itself.
     const at = r.landsOn ? cpStart(text, Math.max(0, r.target - 1)) : r.target;
     return reset(st, [{ t: 'setCaret', at }]);
   }
@@ -392,7 +393,23 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
     if (m.vertical) {
       return reset(state, [{ t: 'moveVertical', dir: m.vertical, count }]);
     }
-    return reset(state, [{ t: 'setCaret', at: motionCaret(m.result) }]);
+    let at = m.result.target;
+    // landsOn motions (e, `,` over f/t) put the cursor ON the char, so `x`
+    // deletes it and `a` appends right after it (`ea` was landing at the
+    // start of the NEXT word). `$` keeps this plugin's I-beam EOL convention
+    // (caret past the last char, like gl) — see §0 on block-caret clamping.
+    if (m.result.landsOn && key !== '$') {
+      at = cpStart(text, Math.max(0, at - 1));
+      if (at <= caret && (key === 'e' || key === 'E')) {
+        // vim: e must land on a LATER char. From a caret already on (or past)
+        // the word-end char, rerun from the next code point; if there is no
+        // later word end, e fails in place (never moves backward).
+        const m2 = motionFor(state, key, snap, cpForward(text, caret, 1));
+        if (m2 && !m2.vertical) at = cpStart(text, Math.max(0, m2.result.target - 1));
+        if (at <= caret) at = caret;
+      }
+    }
+    return reset(state, [{ t: 'setCaret', at }]);
   }
 
   switch (key) {
@@ -591,11 +608,6 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
   }
 
   return reset(state);
-}
-
-/** Where a plain (non-operator) motion puts the caret. */
-function motionCaret(r: MotionResult): number {
-  return r.target;
 }
 
 function withCharRegister(state: VimState, text: string): VimState {

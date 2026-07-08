@@ -36,9 +36,9 @@ describe('motions', () => {
     e.keys('bb');
     expect(e.caret).toBe(0);
     e.keys('e');
-    expect(e.caret).toBe(5);
+    expect(e.caret).toBe(4); // ON the word-end char (x deletes it, a appends after)
     e.keys('e');
-    expect(e.caret).toBe(11);
+    expect(e.caret).toBe(10);
   });
 
   it('w treats punctuation as its own word, W does not', () => {
@@ -70,7 +70,7 @@ describe('motions', () => {
     expect(e.caret).toBe(4); // , reverse-repeats: back to the first o
     const e2 = h('hello world');
     e2.keys('t ');
-    expect(e2.caret).toBe(5); // just before the space
+    expect(e2.caret).toBe(4); // ON the char just before the space (vim t)
   });
 
   it('j/k move vertically, Enter moves down', () => {
@@ -190,12 +190,14 @@ describe('operators with motions', () => {
     const e = h('a asdf');
     e.keys('de');
     expect(e.line).toBe('asdf');
-    // and plain e from the same spot moves one word-end, not two
+    // plain e: the cursor is already ON the one-char word's end, so e jumps
+    // to the end of the NEXT word (vim's "must land later" rule) …
     const e2 = h('a asdf');
     e2.keys('e');
-    expect(e2.caret).toBe(1);
+    expect(e2.caret).toBe(5);
+    // … and with no later word end left, e fails in place (never backward)
     e2.keys('e');
-    expect(e2.caret).toBe(6);
+    expect(e2.caret).toBe(5);
   });
 
   it('dgl deletes to end of line (live d$), dgh to first non-blank', () => {
@@ -659,6 +661,70 @@ describe('shift-blind synonyms (live-reachable spellings)', () => {
     expect(e.caret).toBe(6); // the z in "lazy" (t0 h1 e2 _3 l4 a5 z6)
     e.keys('x');
     expect(e.lines[0]).toBe('the lay dog');
+  });
+
+  it('t lands BEFORE the char so t<c> then x deletes the char before it', () => {
+    const e = h('abcx');
+    e.keys('tx');
+    expect(e.caret).toBe(2); // ON the c, just before x
+    e.keys('x');
+    expect(e.line).toBe('abx');
+  });
+
+  it('T lands just AFTER the char so T<c> then x deletes that position', () => {
+    const e = h('xabc', 0, 3);
+    e.keys('Tx');
+    expect(e.caret).toBe(1); // just after the x
+    e.keys('x');
+    expect(e.line).toBe('xbc');
+  });
+
+  it('dt<c> still deletes up to but not including the char', () => {
+    const e = h('abcx');
+    e.keys('dtx');
+    expect(e.line).toBe('x');
+  });
+
+  it('2tx lands before the second x, skipping an adjacent one', () => {
+    const e = h('axxb');
+    e.keys('2tx');
+    expect(e.caret).toBe(1); // ON the first x, just before the second
+  });
+
+  it(', after F repeats forward and actually moves (was stuck on-char)', () => {
+    const e = h('xoxo', 0, 3);
+    e.keys('Fo');
+    expect(e.caret).toBe(1);
+    e.keys(',');
+    expect(e.caret).toBe(3); // back forward to the o it started on
+  });
+
+  it('visual tx selects up to but NOT including the x', () => {
+    const e = h('abcx');
+    e.keys('vtxd');
+    expect(e.line).toBe('x');
+  });
+
+  it('e then a appends right after the word, not at the next word', () => {
+    const e = h('one two');
+    e.keys('e');
+    expect(e.caret).toBe(2); // ON the e of "one"
+    e.keys('x');
+    expect(e.line).toBe('on two'); // e landed on a deletable char
+    const e2 = h('one two');
+    e2.keys('ea');
+    expect(e2.mode).toBe('insert');
+    expect(e2.caret).toBe(3); // insert point immediately after "one"
+  });
+
+  it('e from the word-end char advances to the NEXT word end', () => {
+    const e = h('one two three');
+    e.keys('e');
+    expect(e.caret).toBe(2);
+    e.keys('e');
+    expect(e.caret).toBe(6);
+    e.keys('e');
+    expect(e.caret).toBe(12);
   });
 
   it('/ does NOT open the command line (RemNote slash menu owns it)', () => {

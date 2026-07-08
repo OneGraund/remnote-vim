@@ -150,12 +150,14 @@ try {
   check('0 w x deletes exactly the chip', await readRem(ids.refLine), 'see  endZ');
 
   // ---- 3. offsets far right of a chip stay exact (f + dw) ----
+  // f lands ON the m (unit offset right of the 2-unit chip), so dw deletes
+  // the whole word "more" — a chip-offset error would hit other chars.
   await clickRem(ids.refLine2);
   await keys(['0']);
   await keys(['f', 'm']);
   await keys(['d', 'w']);
   await wait(500);
-  check('fm dw after a chip hits the right chars', await readRem(ids.refLine2), 'pre ¤ tail m');
+  check('fm dw after a chip hits the right chars', await readRem(ids.refLine2), 'pre ¤ tail ');
 
   // ---- 4. emoji: l is one step, x deletes the whole pair ----
   await clickRem(ids.emojiLine);

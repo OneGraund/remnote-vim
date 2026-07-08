@@ -146,18 +146,20 @@ describe('findChar', () => {
     // caret 4 = cursor char 'o' — a fresh f skips it, finds the o in world
     expect(findChar(s, 4, 'f', 'o', false)?.target).toBe(8);
   });
-  it('f repeat searches from the caret (already past the last hit)', () => {
-    expect(findChar(s, 5, 'f', 'o', true)?.target).toBe(8);
+  it('f repeat from a cursor ON the found char finds the next one', () => {
+    // after fo the cursor sits ON the o at 4 — repeat reaches the o in world
+    expect(findChar(s, 4, 'f', 'o', true)?.target).toBe(8);
   });
   it('f fails when the char does not occur', () => {
     expect(findChar(s, 0, 'f', 'z', false)).toBeNull();
   });
-  it('t stops just before the char', () => {
-    expect(findChar(s, 0, 't', 'o', false)).toEqual({ target: 4, landsOn: false });
+  it('t lands ON the char before the found one (target = its exclusive end)', () => {
+    expect(findChar(s, 0, 't', 'o', false)).toEqual({ target: 4, landsOn: true });
   });
-  it('t repeat skips the char it is already touching', () => {
-    // caret 4 = just before the o at 4; repeat must reach the o in world
-    expect(findChar(s, 4, 't', 'o', true)?.target).toBe(7);
+  it('t repeat skips the occurrence it already sits before', () => {
+    // cursor 3 = ON the char just before the o at 4 (where t left it);
+    // a repeat must skip that o and stop before the o in world
+    expect(findChar(s, 3, 't', 'o', true)?.target).toBe(7);
   });
   it('F finds a match immediately left of the cursor char (regression)', () => {
     // caret 2 on "abc" = cursor char 'c'; Fb must land on the adjacent b.
@@ -166,9 +168,11 @@ describe('findChar', () => {
   it('F lands ON the found char', () => {
     expect(findChar(s, 9, 'F', 'o', false)?.target).toBe(7);
   });
-  it('F repeat skips the char the caret is touching (after an f landing)', () => {
-    // after fo the caret is at 5, touching the o at 4 — repeat finds nothing earlier? no: only one o before → fails
-    expect(findChar('xoxo', 4, 'F', 'o', true)?.target).toBe(1);
+  it('F repeat finds a match adjacent to the cursor (no skip for F)', () => {
+    // after fo the cursor sits ON the o at 3; the landing char itself is
+    // already excluded by the strictly-before search, so the adjacent o at 1
+    // must be found — a skip here would wrongly jump past it.
+    expect(findChar('xoxo', 3, 'F', 'o', true)?.target).toBe(1);
   });
   it('F fails when nothing is left of the cursor', () => {
     expect(findChar('abc', 0, 'F', 'a', false)).toBeNull();

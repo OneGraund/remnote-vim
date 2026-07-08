@@ -80,8 +80,9 @@ export function stopsBetween(s: string, from: number, to: number): number {
 export interface MotionResult {
   target: number;
   /**
-   * True when the motion conceptually lands ON a character (e, f, $):
-   * in visual mode the head becomes target-1 so the selection matches vim.
+   * True when the motion conceptually lands ON a character (e, f, t, $):
+   * `target` is the inclusive operator-range end (one PAST the landed-on
+   * char), so the plain-motion caret and the visual head become target-1.
    */
   landsOn: boolean;
 }
@@ -157,9 +158,12 @@ export function firstNonBlank(s: string): number {
 }
 
 /**
- * `f`/`F`/`t`/`T`. Returns null if the character is not found.
- * f returns the offset after the found char (inclusive), t the offset
- * before it, F/T the mirrored backward variants.
+ * `f`/`F`/`t`/`T`. `c` is the cursor's on-char index; returns null if the
+ * character is not found. The forward finds land ON a char (landsOn:true,
+ * target = one past it): f on the found char itself, t on the char before
+ * it — so `target` doubles as the inclusive operator end (`df`/`dt`).
+ * F lands on the found char, T just after it (landsOn:false, target = the
+ * cursor position itself).
  */
 export function findChar(
   s: string,
@@ -169,22 +173,25 @@ export function findChar(
   isRepeat: boolean
 ): MotionResult | null {
   if (key === 'f' || key === 't') {
-    let from = isRepeat ? c : c + 1;
-    let i = s.indexOf(ch, from);
-    if (key === 't' && i >= 0 && i === c) {
+    // The cursor char itself never matches — search from c+1, repeat or not.
+    let i = s.indexOf(ch, c + 1);
+    // Repeating `t` (a `,` reverse-repeat or a count hop) with the cursor
+    // already just before an occurrence would re-find it and never move —
+    // skip it (vim's default-cpoptions `;` rule).
+    if (key === 't' && isRepeat && i === c + 1) {
       i = s.indexOf(ch, c + 2);
     }
     if (i < 0) return null;
-    return key === 'f' ? { target: i + 1, landsOn: true } : { target: i, landsOn: false };
+    return key === 'f' ? { target: i + 1, landsOn: true } : { target: i, landsOn: true };
   } else {
     // Search strictly before the cursor char at c — so from c-1 inclusive.
     // (This used to start at c-2 unconditionally, silently missing a match
     // immediately left of the cursor: `Fb` on "abc" with the caret on 'c'
-    // found nothing.) On a REPEAT (`,` after f/t) the caret sits touching
-    // the previously found char at c-1 — skip it or the repeat re-finds the
-    // same spot and never moves (vim's `;`/`,` rule).
+    // found nothing.) Repeating `T` with the cursor just after an occurrence
+    // (at c-1) would re-land at c and never move — skip it. F has no skip:
+    // its landing char is at c and already excluded by the c-1 start.
     let from = c - 1;
-    if (isRepeat && s[c - 1] === ch) from = c - 2;
+    if (key === 'T' && isRepeat && s[c - 1] === ch) from = c - 2;
     if (from < 0) return null;
     const i = s.lastIndexOf(ch, from);
     if (i < 0) return null;
@@ -211,7 +218,9 @@ export function findCharCount(
   for (let k = 0; k < count; k++) {
     r = findChar(s, cur, key, ch, k > 0 ? true : isRepeat);
     if (!r) return null;
-    cur = r.target;
+    // Continue from the CURSOR position the hop lands at (on-char), not the
+    // operator-space target — the repeat-skip rules are cursor-relative.
+    cur = r.landsOn ? r.target - 1 : r.target;
   }
   return r;
 }

@@ -15,6 +15,173 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — t/T and ea motion bugs FIXED + live-verified (on-char landing); env recovered; block cursor still blocked
+
+Picked up the handoff below (next entry). **The two confirmed motion bugs are
+fixed, unit-tested and live-verified; committed.** The block-cursor/native-mode
+blocker is unchanged — see the handoff entry for that state. Environment
+recovered: the crashed app was relaunched (`./e2e/launch.sh`, CDP 9223) and the
+**webpack dev server on 8080 was found wedged** (watching but never rebuilding —
+`touch` did nothing; it had been up since ~12:43). Killed + restarted `npm run
+dev`; if a "fixed" bug still reproduces live, check the served bundle for a
+fresh code marker before debugging.
+
+**The fix (one root cause for both bugs):** landsOn semantics are now uniform —
+a `landsOn` motion's `target` is its inclusive operator end (one PAST the
+landed-on char) and the plain-motion caret / visual head become `target-1`.
+
+- `motions.ts findChar`: **`t` is now `landsOn:true` with `target = i`** (the
+  found char's index = its exclusive operator end = one past the landed-on
+  char). That one change fixed normal `tx`, visual `vtx` (previously included
+  the x), and `,`-repeat placement in all three paths, with `dtx` unchanged.
+  `findChar`'s `c` is now explicitly the CURSOR (on-char) index: forward finds
+  always search from c+1 (the cursor char never matches), the repeat-adjacency
+  skips are now per-key (`t` and `T` only — an F skip would wrongly jump past
+  an adjacent match, which `,`-after-f needs to find), and `findCharCount`
+  hops pass the CURSOR position between hops, not the raw target (fixes
+  `2tx` over adjacent chars, `,`-after-F was stuck on-char).
+- `engine.ts` normal-motion branch: **landsOn motions now land ON the char**
+  (`cpStart(target-1)`), so `e` puts the caret on the word-end char — `x`
+  deletes it and `ea` appends right after the word (the user's bug: it landed
+  at the NEXT word's start). vim's "e must land on a LATER char" progress rule
+  applies (rerun from the next code point; if no later word end, e fails in
+  place, never moves backward). **`$` deliberately keeps the I-beam EOL
+  convention** (caret past the last char, like `gl`) pending the §0-item-3
+  block-caret-clamping decision. Plain `e` on a one-char word now jumps to the
+  NEXT word's end (vim); operator `de`/`ce` keep the I-beam rule (`de` on
+  "a asdf" still deletes just "a" — the 2026-07-07 user request).
+
+**Tests 352 → 360** (new: tx/Tx/dtx, 2tx adjacent, `,`-after-F, vtx, e+x /
+ea / e-progress matrices; 5 stale pins updated to the vim-correct values).
+**Live: new `e2e/motionfix.mjs` probe suite 8/8** (fz/tx/dtx/e/ee/`,`/2tx/ea
+typed through the real key path). Full regression: smoke 16/16, stress 57/57,
+formatting 5/5, reallife 31/34 (same 3 documented known issues, 0 violations).
+
+**Stale-pin fix in `e2e/formatting.mjs`:** the "fm dw" probe still expected
+the PRE-f-fix landing (`"pre ¤ tail m"`, i.e. dw from one-past-the-m). With f
+landing ON the m, dw deletes all of "more" → `"pre ¤ tail "`. The 9ec436c
+session's "formatting 5/5" evidently ran against a pre-fix bundle (see the
+wedged-webpack note above — same hazard). Pin corrected, 5/5 again.
+
+Note for the suites: the working tree's uncommitted block-cursor WIP
+(adapter render hook + `requestNative:true` manifest) was IN the bundle for
+all of the above runs and is inert while sandboxed (`native:no` badge) —
+everything passes with it loaded.
+
+### 2026-07-08 — HANDOFF (account switch): block-cursor feature BLOCKED on native mode; 2 more motion bugs found (t/T, ea)
+
+**⚠ Read this first. App CRASHED at handoff; work is UNCOMMITTED in the working
+tree. Nothing here is verified end-to-end yet.** The e2e RemNote instance
+(CDP 9223) crashed when I called `getPluginManager().restartInDevMode('remnote-vim')`
+trying to force native mode (see below) — relaunch with `./e2e/launch.sh` before
+resuming. HEAD is still `9ec436c` (last session's committed work). `npm test`
+and `tsc` are green on the working tree.
+
+**Uncommitted working-tree changes (all block-cursor WIP — do NOT commit until
+native mode works AND the full e2e suite is re-verified):**
+- `public/manifest.json`: `requestNative` false→**true**.
+- `src/adapter/blockCursor.ts`: NEW module — draws the vim block caret as a
+  host-page overlay div (`mix-blend-mode:difference` over white so it inverts
+  whatever's under it → visible on light AND dark; the character stays legible).
+  Handles EOL (cover the last char) and empty line (default-width block).
+- `src/adapter/adapter.ts`: imports + calls `updateBlockCursor(mode)` at the end
+  of `render()`; also added `native:${hostDocument()?'yes':'no'}` to the
+  `body::before` debug badge (KEEP this — it's how you tell if native is live).
+
+#### The feature (user request)
+Make the caret vim-like: a **block over the current char in normal/visual**
+mode, a **thin bar in insert**. User's key constraint (learned the hard way):
+it MUST be visible in **dark mode** — a semi-transparent purple block is
+invisible on a dark background. The `mix-blend-mode: difference` (solid white)
+approach is theme-agnostic by construction. A CDP prototype confirmed the look
+is right in light mode; user approved the direction.
+
+#### THE BLOCKER — native mode is not activating (the core problem to solve)
+A true block cursor needs to position an overlay at the caret's **screen rect**,
+which needs main-page DOM access (`window.top.document`). The plugin is a
+**cross-origin sandboxed iframe** (`hostDocument()` returns null), so sandboxed
+it can only inject static CSS via `registerCSS` — no overlay possible. The
+dormant `src/adapter/domCaret.ts` (`hostDocument`/`readDomCaret`/`setDomCaret`,
+already imported by adapter.ts lines ~296/934) was written for native mode.
+
+`caret-shape: block` CSS (the clean one-liner) is **NOT supported** in RemNote's
+Chromium 136 (shipped in Chrome 139+). Confirmed via `CSS.supports`.
+
+I flipped `requestNative: true` and relaunched. Findings (all probed live via
+`window.getPluginManager()`):
+- The relaunch loads the **fresh JS bundle** but NOT a new sandbox decision.
+  Debug badge shows `native:no`.
+- `pm.getPluginById('remnote-vim').userPluginInfo` has `isNative:false`,
+  `isLocal:true`, `baseUrl:"http://localhost:8080/"`, and its cached
+  `manifest.requestNative` is still **false** — RemNote caches the manifest in
+  the installed-dev-plugin record; an app relaunch reuses it.
+- `restartInDevMode(id)` = `unregister(id)` then `register((await b.Nj())[id])`.
+  `b.Nj()` returns a CACHED plugin-info map (still `requestNative:false`), so it
+  did NOT flip `isNative`, and the call **crashed the app**.
+- The dev server DOES serve the new manifest (`curl localhost:8080/manifest.json`
+  → `requestNative:true`), so the cache is the only thing stale.
+
+**What the next account must figure out (needs the author / manual RemNote UI):**
+1. Force RemNote to re-read the manifest: almost certainly **remove and re-add
+   the dev plugin** in Settings→Plugins→Build (pointing at localhost:8080), so
+   the install record picks up `requestNative:true`. An app relaunch alone does
+   not do this. (Alternatively find+edit the plugin record in the profile
+   SQLite at `/tmp/remnote-vim-e2e-home/remnote/.../remnote.db`, risky.)
+2. **Unknown / verify:** whether RemNote even allows a **local/dev** plugin to
+   run native, or whether native requires a store-published plugin (which would
+   mean the block cursor only ships to end users via a native-published plugin +
+   a scary permission grant). If dev-native is impossible, reconsider the whole
+   approach.
+3. Once `native:yes` shows on the badge: the block cursor should render (the
+   `#vim-block-cursor` div appears in the main page). Then screenshot at
+   mid-word / EOL / empty-line / insert, AND **switch the e2e instance to dark
+   mode** to prove visibility (it's light by default; the difference-blend
+   should invert fine but SEE it).
+4. **Regression risk:** native mode ALSO activates the dormant
+   `readDomCaret`/`setDomCaret` paths (adapter ~296/934), dead under sandbox.
+   So going native changes caret handling globally — re-run the FULL e2e suite
+   (run/stress/tree/formatting/reallife) native before trusting anything.
+
+If native proves unworkable: fall back to a **sandboxed visibility boost**
+(brighter theme-aware caret-color, bolder cursorline bar, stronger focused-row
+tint) — no true block, but zero risk. Offer the user this choice.
+
+#### Bug hunt — 2 CONFIRMED motion bugs still to fix (the "find 3 more bugs" task)
+1. **`t`/`T` cursor off-by-one** (SAME family as the committed `f` fix).
+   `tx` then `x` deletes `x` instead of the char before it (probed: "abcx" →
+   "abc", want "abx"). Root: engine.ts pending-find block (~line 310). The
+   committed `f` fix used `landsOn ? target-1 : target`, but `t` is
+   `landsOn:false, target=i` and ALSO needs `target-1`. Correct rule is by
+   DIRECTION not landsOn: **forward finds (f AND t) → cursor = target-1;
+   backward (F, T) → cursor = target** (`fk==='f'||fk==='t'`). Add unit tests
+   (`tx`+`x`, `Tx`+`x`, `dtx` still deletes through — operator path is separate
+   and already correct). Don't break the committed `f` behavior.
+2. **`ea` lands at the start of the NEXT word** (user-reported real workflow:
+   `e`→`a` should append right after the word). Almost certainly the same
+   family: normal-mode `e` (engine.ts ~line 389, `motionCaret` ignores
+   `landsOn`) overshoots the word-end char by one, so `a` (=cpForward+1) lands
+   two past. VERIFY with `e`+`x` (should delete the word-end char) and
+   `e`+`a`+type. FIX must keep `de`/`ce` operators correct (they need the
+   inclusive end — separate path). This is the bug the USER most cares about
+   after the cursor.
+3. **`$`/EOL block-caret semantics (design decision, ties to the block cursor).**
+   This plugin's normal-mode caret uses I-BEAM semantics — `$`/`gl` land at `n`
+   (PAST the last char), so `r`/`~`/`x` at EOL hit nothing (`$rz` on "abc" →
+   "abc" unchanged) and the block cursor has no char to cover at EOL. Vim's
+   block caret is clamped to the last char (`$` lands ON it). **Adopting
+   vim block-caret clamping in normal/visual (never past last char) would fix
+   the block-cursor EOL case AND the r/~/x-at-EOL bugs at the root** — but it's
+   a bigger change (clamp `$`, `l`, motions in normal mode; keep `a`/insert able
+   to reach `n`). Worth considering alongside the block cursor.
+   Also flagged, needs cleaner repro: `C-a` on "item 9" gave "item 13" (want
+   "item 10"); `C-a` on "-3" gave "1" (negative-number handling in
+   motions.ts `numberAt`). And `$~` on "abc" gave "ABC". Re-probe these.
+
+Bug-hunt method: a live probe script drove ~18 vim behaviors and diffed against
+real vim (`reset`→type→keys→read focused-rem text). Recreate it under `e2e/`
+(I deleted the throwaway `_hunt.mjs`); most sandboxed shift-blind keys (D=d$,
+C=c$) are NOT bugs — the plugin uses g-chords (`dgl`, `cgl`).
+
 ### 2026-07-08 — Stability pass live-verified + committed; real-life e2e suite added; f-motion off-by-one FIXED
 
 Picked up the mid-verification handoff below and closed it out. **Everything
