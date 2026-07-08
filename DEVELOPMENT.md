@@ -15,15 +15,38 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — Block cursor: FINAL decision — caret-shape only, wait for the platform
+
+**USER DECISION (2026-07-08, final):** the plugin is being published, so the
+block cursor ships exclusively via the standards-based `@supports
+(caret-shape: block)` rule already in `render()` (previous entry, item 2).
+**On newer Chromium (with `caret-shape` support) users get a correct block
+cursor in normal/visual; on older Chromium — like the desktop app's
+Electron 36 / Chromium 136 — not so much:** they get the thin mode-colored
+caret + mode-colored cursorline fallback until RemNote upgrades Electron.
+No further action on our side — it's the platform's turn.
+
+Explicitly rejected (don't re-propose): the **1-char-selection fake block**
+(keep a native selection on the cursor char in normal mode, style
+`::selection`). A live probe showed the core works — `selectText({start,
+end:start+1})` renders a char-sized box, no formatting toolbar popped, SDK
+reads it back cleanly (`isReverse:false`, correct range) — but it needs
+collapse/re-select around every keystroke through async APIs (flicker risk,
+EOL/empty-line/mouse edge cases). Not worth it for a published plugin.
+`src/adapter/blockCursor.ts` (the native-only overlay WIP, never committed)
+was **deleted**; its approach (host-page overlay div, mix-blend-mode
+difference, tracks the DOM caret rect) is described in the 2026-07-08
+handoff entry below if native mode ever ships.
+
 ### 2026-07-08 — Sandboxed visibility boost SHIPPED (user picked option (a); block-cursor WIP retired)
 
 **USER DECISION (2026-07-08):** of the block-cursor options below, the user
 chose **(a) sandboxed visibility boost** — the plugin is meant for public
 use, so only store-shippable mechanisms are in play. The native-only WIP was
 therefore **reverted from `src/adapter/adapter.ts`** (import, render hook,
-`native:` badge suffix); `src/adapter/blockCursor.ts` remains as an
-untracked local file only — if native mode ever ships, resurrect it from
-there or from this entry's git history, and see §9 for the re-test recipe.
+`native:` badge suffix); `src/adapter/blockCursor.ts` was kept briefly as
+an untracked local file, then deleted (see the final-decision entry above —
+the approach is documented in the handoff entry; §9 has the re-test recipe).
 
 What shipped (all in `render()`, CSS-only — no engine/adapter behavior
 change):
@@ -1648,10 +1671,15 @@ against RemNote 1.26.30):
   UI — mode badge, debug HUD, cursorline — is dead) and the app throws React
   invariant errors (broken editor rendering). Verdict: native is a
   deliberately unfinished, switched-off feature — there is NO shippable or
-  even dev-usable native path on this version. `domCaret.ts`/`blockCursor.ts`
-  exist for if/when RemNote unblocks it; keep `requestNative: false` in
-  manifest.json until then (it's store-poisonous). Force-recipe and probing
-  tools (`e2e/main-repl.mjs`) are in the 2026-07-08 §0 entry.
+  even dev-usable native path on this version. `domCaret.ts` stays (its
+  `hostDocument()` null-check is the native/sandbox switch); the overlay
+  block-cursor WIP (`blockCursor.ts`) was deleted — approach documented in
+  the 2026-07-08 handoff §0 entry. Keep `requestNative: false` in
+  manifest.json until RemNote unblocks native (it's store-poisonous).
+  Force-recipe and probing tools (`e2e/main-repl.mjs`) are in the
+  2026-07-08 §0 entry. Meanwhile the block cursor rides CSS `caret-shape`:
+  correct block on newer Chromium, thin colored caret on older (see the
+  2026-07-08 final-decision entry).
 - **Direct clipboard writes from the sandbox NEVER work** (probed live):
   `navigator.clipboard.writeText` rejects with "Document is not focused",
   the `clipboard-write` permission is hard-denied for the plugin iframe, and
