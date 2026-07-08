@@ -15,6 +15,62 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — NATIVE MODE INVESTIGATION CLOSED: hard-disabled platform-wide; block-cursor-via-native is a dead end on 1.26.30
+
+Same session as the motion-fix entry below; this closes the handoff's
+native-mode questions **definitively, from the app's own code** (extracted
+the AppImage → grepped `resources/app.asar`; then verified live by forcing
+the flag). Full mechanics now live in **§9's native-mode bullet**; summary:
+
+1. **Why the manifest flip did nothing:** `requestNative` only feeds
+   `installPlugin`'s `isNative` computation, which is `!O && requestNative
+   && (!isLocal || id === "demo_all_features")` — a module-level `let O = !0`
+   kill switch plus a local-plugin exclusion. Re-adding the dev plugin
+   (handoff question 1) would NOT have helped: the flag computes false for
+   every plugin on this version.
+2. **The deeper lock:** the `PluginHost` constructor clears `isNative` on
+   every registration (`m.sF && (e.isNative = !1)`). There is even a
+   user-facing per-plugin "native mode" settings switch (calls
+   `ot(id, {isNative})` → unregister/setNested/register) — it exists but is
+   silently undone by the same kill switch. Store policy also rejects
+   `requestNative:true` submissions ("REJECT IF TRUE FOR NOW" in the review
+   UI). So: **no shippable native path exists today, dev or store**
+   (handoff question 2 answered).
+3. **Forced-native experiment** (unregister, then `pm.register(record)` with
+   `isNative` as an accessor property — getter `true`, no-op setter — which
+   neutralizes the constructor's clear): the native runtime DOES activate —
+   widget mounts as `div[data-is-native-plugin]` + shadow root in the main
+   page (no iframe), `window.__vimAdapter` appears in the MAIN window, keys
+   steal fine, `hostDocument()` works, and **the block cursor renders and
+   tracks** (measured `#vim-block-cursor` rects: 13.1px char-width
+   difference-blend block mid-word, repositioning on 0/w/gl; the local
+   `e2e/shots/native-cursor-*.png` mostly show the React error state, not a
+   clean look — trust the rects). BUT: `registerCSS` output lands in the widget's
+   shadow root (mode badge / debug HUD / cursorline all dead — every
+   badge-reading e2e suite aborts), and the app throws React invariant
+   errors with broken editor rendering. Native is a deliberately unfinished,
+   switched-off feature; even dev use is not viable.
+
+**State restored afterwards:** app relaunched clean (sandboxed iframe,
+badge shows `native:no`, stored `isNative:false`), motionfix probes 8/8.
+`public/manifest.json` reverted to `requestNative: false` (it does nothing
+here and is store-poisonous). New tool committed: `e2e/main-repl.mjs`
+(main-window REPL incl. webpack-module access recipe, §7).
+
+**⚠ USER DECISION NEEDED — where to take the block cursor now.** The WIP
+(`src/adapter/blockCursor.ts` + the adapter render hook, still uncommitted)
+is validated as an approach but can only ship if RemNote enables native mode.
+Options: (a) **sandboxed visibility boost** (brighter theme-aware
+caret-color, bolder cursorline, stronger focused-row tint — no true block,
+zero risk, shippable now) — the handoff's fallback, recommended; (b) shelve
+blockCursor.ts in-tree behind the `hostDocument()` null-check (it already
+no-ops sandboxed) and revisit when RemNote flips the switch (the §9 bullet
+documents how to re-test quickly); (c) ask the RemNote team about the
+native-mode timeline (the switch + settings UI are clearly built, just off).
+(a)+(b) combine naturally. Also still open from the handoff: the §0-item-3
+EOL/block-caret clamping design decision, and the flagged `C-a` on "item 9" /
+negative-number `C-a` / `$~` re-probes.
+
 ### 2026-07-08 — t/T and ea motion bugs FIXED + live-verified (on-char landing); env recovered; block cursor still blocked
 
 Picked up the handoff below (next entry). **The two confirmed motion bugs are
@@ -1381,6 +1437,41 @@ state you mutate is real — clean up after probes. Remember the app restart
 requirement when you edit adapter code (§0 evening entry): the iframe does
 not pick up rebuilds; `pkill -f 'remote-debugging-port=9223'` and relaunch.
 
+### Main-window REPL — `e2e/main-repl.mjs`
+
+The sibling of sdk-repl for the HOST page: runs an async JS body in the main
+RemNote window, with `pm` bound to `window.getPluginManager()`:
+
+```bash
+node e2e/main-repl.mjs 'return Object.keys(pm.pluginIdToPluginHost)'
+```
+
+To reach RemNote's internal (webpack) modules from a probe, grab the require
+fn by pushing a probe chunk — this is how the whole §9 native-mode
+investigation was done (module `891324` = plugin install/records, `951185` =
+PluginHost, store at `req(607680).UserDataStore.installedPlugins`):
+
+```js
+let req;
+window.webpackChunk_remnote_client.push([[Symbol('probe')], {}, (r) => { req = r; }]);
+const mod = req(891324); // e.g. mod.ds() = installed-plugin records
+```
+
+Module ids are for the 1.26.30 bundle — re-locate them after an app update
+by grepping the extracted AppImage's `resources/app.asar` for a nearby
+string (it's greppable as-is; see the §0 2026-07-08 native entry).
+
+### Targeted motion probes — `e2e/motionfix.mjs`
+
+Small text-diff probes for the find/word-end cursor-landing class
+(f/t/dt/e/ea/`,`/counts), typed through the real key path against a fixture
+line. Much faster than the full suites when touching `motions.ts` landing
+semantics; run it plus `formatting.mjs` before reaching for run/stress.
+
+```bash
+REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 node e2e/motionfix.mjs
+```
+
 ## 8. Debugging checklist
 
 - **Key does nothing live, but the unit test passes:** check `keymap.ts` —
@@ -1479,9 +1570,34 @@ against RemNote 1.26.30):
 - **The collapsed caret can't be read**, only moved relatively (§6) → don't
   add code that assumes you can query "where is the caret right now" from
   RemNote directly; track it in the model instead.
-- **`requestNative: true` currently does nothing** (manifest.json has it set
-  to `false`; `domCaret.ts` exists for if/when RemNote unblocks it, but
-  `hostDocument()` will keep returning `null` in the sandbox until then).
+- **Native plugin mode is HARD-DISABLED platform-wide in RemNote 1.26.30**
+  (read from the app bundle + forced live, 2026-07-08 — full story in §0):
+  `requestNative: true` does nothing for ANY plugin, local or store. Three
+  independent locks: (1) `installPlugin` computes
+  `isNative = !O && requestNative && (!isLocal || id === "demo_all_features")`
+  where `O` is a module-level `let O = !0` kill switch — so local/dev plugins
+  are also excluded by policy even if `O` flips; (2) the `PluginHost`
+  constructor does `m.sF && (e.isNative = !1)` (same `O` via getter export
+  `sF`), clearing the flag on EVERY registration — flipping the stored record
+  (`UserDataStore.installedPlugins.pluginData.setNested`) or toggling the
+  per-plugin "native mode" settings switch (it exists! calls `ot(id,
+  {isNative})`) is silently undone here; (3) the plugin-store review UI
+  renders "Request Native: … (REJECT IF TRUE FOR NOW)" — store submissions
+  with `requestNative:true` are rejected by policy. Forcing registration
+  with an accessor-protected record (getter `true`, no-op setter — neutralizes
+  lock 2) DOES activate the native runtime: the widget mounts as a
+  `div[data-is-native-plugin]` + open shadow root in the MAIN page (no
+  iframe; `getWidgetURL` loads `index.js` — this is why the build emits
+  `index-sandbox.js` twins), `window.__vimAdapter` appears in the main
+  window, keys are stolen, and `hostDocument()` works — but `registerCSS`
+  output lands inside the widget's shadow root (all `body::before/::after`
+  UI — mode badge, debug HUD, cursorline — is dead) and the app throws React
+  invariant errors (broken editor rendering). Verdict: native is a
+  deliberately unfinished, switched-off feature — there is NO shippable or
+  even dev-usable native path on this version. `domCaret.ts`/`blockCursor.ts`
+  exist for if/when RemNote unblocks it; keep `requestNative: false` in
+  manifest.json until then (it's store-poisonous). Force-recipe and probing
+  tools (`e2e/main-repl.mjs`) are in the 2026-07-08 §0 entry.
 - **Direct clipboard writes from the sandbox NEVER work** (probed live):
   `navigator.clipboard.writeText` rejects with "Document is not focused",
   the `clipboard-write` permission is hard-denied for the plugin iframe, and
