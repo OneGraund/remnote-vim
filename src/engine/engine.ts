@@ -2,7 +2,10 @@ import {
   findChar,
   firstNonBlank,
   nextWordStart,
+  numberAt,
+  pairObject,
   prevWordStart,
+  quoteObject,
   wordEnd,
   wordObject,
   MotionResult,
@@ -19,6 +22,11 @@ export { initialState };
  * 'Backspace', 'C-r'.
  */
 export function handleKey(state: VimState, key: string, snap: Snapshot): EngineResult {
+  const res = dispatch(state, key, snap);
+  return recordDotRepeat(state, key, res);
+}
+
+function dispatch(state: VimState, key: string, snap: Snapshot): EngineResult {
   switch (state.mode) {
     case 'insert':
       return handleInsert(state, key, snap);
@@ -31,6 +39,46 @@ export function handleKey(state: VimState, key: string, snap: Snapshot): EngineR
     case 'command':
       return handleCommand(state, key, snap);
   }
+}
+
+/** Document-mutating actions worth repeating with `.` (undo/redo are not). */
+const DOT_MUTATING = new Set<Action['t']>([
+  'deleteRange',
+  'insertText',
+  'deleteRem',
+  'pasteRem',
+  'indent',
+  'outdent',
+  'joinRem',
+]);
+
+/**
+ * Dot-repeat bookkeeping. A repeatable change is a key sequence that starts
+ * AND completes in normal mode and emits a mutating action — `dw`, `3dd`,
+ * `rx`, `p`, `gj`, `C-a`… Commands that enter insert mode (`cw`, `o`) are
+ * not recorded: inserted text never reaches the engine (insert mode releases
+ * every key), so a replay could only do half the change. `.` itself emits
+ * `replayKeys` (not mutating), so it never records itself; the replayed keys
+ * re-record naturally, keeping `lastChange` stable across repeats.
+ */
+function recordDotRepeat(pre: VimState, key: string, res: EngineResult): EngineResult {
+  if (pre.mode !== 'normal') {
+    if (res.state.keyLog.length) res.state = { ...res.state, keyLog: [] };
+    return res;
+  }
+  const log = [...pre.keyLog, key];
+  const st = res.state;
+  const inProgress =
+    st.mode === 'normal' &&
+    (st.op !== null || st.pending.p !== 'none' || st.count !== '' || st.opCount !== '');
+  if (inProgress) {
+    res.state = { ...st, keyLog: log };
+  } else if (st.mode === 'normal' && res.actions.some((a) => DOT_MUTATING.has(a.t))) {
+    res.state = { ...st, keyLog: [], lastChange: log };
+  } else if (st.keyLog.length) {
+    res.state = { ...st, keyLog: [] };
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------- command line
@@ -182,6 +230,41 @@ function motionFor(
   return null;
 }
 
+/**
+ * Resolve a text-object key (the char after `i`/`a`) to a range. `b`/`B`
+ * are vim's block synonyms — the only live-typeable spelling of `i(`/`i{`,
+ * since `(`/`)`/`{`/`}` are shifted keys the stealing can't see. `"` is
+ * likewise unreachable live (arrives as `'`) but supported for other hosts.
+ */
+function textObjectFor(
+  text: string,
+  caret: number,
+  key: string,
+  around: boolean
+): { start: number; end: number } | null {
+  switch (key) {
+    case 'w':
+    case 'W':
+      return wordObject(text, caret, around, key === 'W');
+    case 'b':
+    case '(':
+    case ')':
+      return pairObject(text, caret, '(', ')', around);
+    case 'B':
+    case '{':
+    case '}':
+      return pairObject(text, caret, '{', '}', around);
+    case '[':
+    case ']':
+      return pairObject(text, caret, '[', ']', around);
+    case "'":
+    case '"':
+    case '`':
+      return quoteObject(text, caret, key, around);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- normal
 
 function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResult {
@@ -232,6 +315,10 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
         return reset(state, [{ t: 'setCaret', at: firstNonBlank(text) }]);
       case 'o': // go → O (open bullet above)
         return toMode(state, 'insert', [{ t: 'newBullet', where: 'above' }]);
+      case 'a': // ga → A (append at end of line)
+        return toMode(state, 'insert', [{ t: 'setCaret', at: n }]);
+      case 'j': // gj → J (join with the next sibling bullet)
+        return reset(state, [{ t: 'joinRem', count }]);
       case 'd': // gd → Ctrl-D (half page down)
         return reset(state, [{ t: 'scroll', dir: 1, count: PAGE }]);
       case 'u': // gu → Ctrl-U (half page up)
@@ -249,13 +336,22 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
 
   if (state.pending.p === 'textobj') {
     const around = state.pending.key === 'a';
-    if (state.op && (key === 'w' || key === 'W')) {
-      const obj = wordObject(text, caret, around, key === 'W');
+    if (state.op && key.length === 1) {
+      const obj = textObjectFor(text, caret, key, around);
       const st: VimState = { ...state, pending: { p: 'none' } };
       if (!obj) return reset(st);
       return applyOperator(st, snap, obj.start, obj.end);
     }
     return reset(state);
+  }
+
+  if (state.pending.p === 'mark') {
+    if (key.length !== 1) return reset(state);
+    return reset(state, [{ t: 'setMark', name: key }]);
+  }
+  if (state.pending.p === 'gotoMark') {
+    if (key.length !== 1) return reset(state);
+    return reset(state, [{ t: 'gotoMark', name: key }]);
   }
 
   // --- counts
@@ -299,6 +395,12 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       return { state: { ...state, pending: { p: 'g' } }, actions: [] };
     case 'r':
       return { state: { ...state, pending: { p: 'replace' } }, actions: [] };
+
+    // --- marks (rem-level; `'x` jumps like vim's line-wise mark)
+    case 'm':
+      return { state: { ...state, pending: { p: 'mark' } }, actions: [] };
+    case "'":
+      return { state: { ...state, pending: { p: 'gotoMark' } }, actions: [] };
 
     // --- mode switches
     case 'i':
@@ -427,6 +529,26 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       return reset(state, [{ t: 'jump', dir: -1 }]);
     case 'C-i':
       return reset(state, [{ t: 'jump', dir: 1 }]);
+
+    // --- number increment / decrement (vim Ctrl-A / Ctrl-X)
+    case 'C-a':
+    case 'C-x': {
+      const r = numberAt(text, caret);
+      if (!r) return reset(state);
+      const next = String(r.value + (key === 'C-a' ? count : -count));
+      return reset(state, [
+        { t: 'deleteRange', start: r.start, end: r.end, keepLead: true },
+        { t: 'insertText', at: r.start, text: next },
+        // vim leaves the cursor on the last digit of the result
+        { t: 'setCaret', at: r.start + next.length - 1 },
+      ]);
+    }
+
+    // --- dot-repeat: replay the last normal-mode change
+    case '.': {
+      if (!state.lastChange || state.lastChange.length === 0) return reset(state);
+      return reset(state, [{ t: 'replayKeys', keys: state.lastChange }]);
+    }
 
     // --- command-line mode. ':' is unreachable live (shift-blind stealing
     // reports it as ';'), so ';' doubles as ':' — always, now that the
@@ -615,6 +737,19 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
 
   if (key === 'f' || key === 'F' || key === 't' || key === 'T') {
     return { state: { ...state, pending: { p: 'find', key } }, actions: [] };
+  }
+
+  // text objects reshape the whole selection (vim vi[ / va')
+  if (state.pending.p === 'textobj') {
+    const around = state.pending.key === 'a';
+    const st: VimState = { ...state, pending: { p: 'none' }, count: '' };
+    const obj = key.length === 1 ? textObjectFor(text, st.head, key, around) : null;
+    if (!obj || obj.end <= obj.start) return { state: st, actions: [] };
+    const st2 = { ...st, anchor: obj.start, head: clamp(obj.end - 1, 0, Math.max(0, n - 1)) };
+    return { state: st2, actions: [selectionAction(st2, snap)] };
+  }
+  if (key === 'i' || key === 'a') {
+    return { state: { ...state, pending: { p: 'textobj', key } }, actions: [] };
   }
 
   const m = motionFor(state, key, snap, state.head);

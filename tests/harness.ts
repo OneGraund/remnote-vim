@@ -35,6 +35,8 @@ export class Harness {
   jumpPos = 0;
   /** focusPane directions emitted (the adapter cycles real panes). */
   paneMoves: number[] = [];
+  /** Marks: name → row (the adapter stores rem ids). */
+  marks: Record<string, number> = {};
   state: VimState;
 
   private undoStack: DocState[] = [];
@@ -70,18 +72,21 @@ export class Harness {
   }
 
   keys(seq: string) {
-    for (const key of tokenize(seq)) {
-      if (this.state.mode === 'insert' && key !== 'Escape') {
-        this.type(key === 'Enter' ? '\n' : key);
-        continue;
-      }
-      const { state, actions } = handleKey(this.state, key, this.snapshot());
-      this.state = state;
-      const mutates = actions.some((a) => MUTATING.has(a.t));
-      if (mutates) this.pushUndo();
-      this.typingRun = false;
-      for (const a of actions) this.exec(a);
+    for (const key of tokenize(seq)) this.step(key);
+  }
+
+  /** One key through the engine — shared by keys() and replayKeys. */
+  private step(key: string) {
+    if (this.state.mode === 'insert' && key !== 'Escape') {
+      this.type(key === 'Enter' ? '\n' : key);
+      return;
     }
+    const { state, actions } = handleKey(this.state, key, this.snapshot());
+    this.state = state;
+    const mutates = actions.some((a) => MUTATING.has(a.t));
+    if (mutates) this.pushUndo();
+    this.typingRun = false;
+    for (const a of actions) this.exec(a);
   }
 
   private type(text: string) {
@@ -145,6 +150,7 @@ export class Harness {
     this.jumps = this.jumps.slice(0, this.jumpPos);
     if (this.jumps[this.jumps.length - 1] !== this.row) this.jumps.push(this.row);
     this.jumpPos = this.jumps.length;
+    this.marks["'"] = this.row; // the adapter's recordJump sets the ' mark too
   }
 
   private exec(a: Action) {
@@ -345,6 +351,42 @@ export class Harness {
       case 'focusPane':
         this.paneMoves.push(a.dir);
         break;
+      case 'setMark':
+        this.marks[a.name] = this.row;
+        break;
+      case 'gotoMark': {
+        const target = this.marks[a.name];
+        if (target == null) break;
+        this.recordJump();
+        this.row = clamp(target, 0, this.lines.length - 1);
+        this.caret = 0;
+        break;
+      }
+      case 'joinRem': {
+        // Mirror the adapter: join with the NEXT SIBLING (same indent, not
+        // past a shallower row). The sibling's subtree rows simply stay —
+        // removing the sibling's own row makes them the joined row's children
+        // in the flat indent model, matching the adapter's child adoption.
+        const joins = Math.max(1, a.count - 1);
+        for (let j = 0; j < joins; j++) {
+          let sib = -1;
+          for (let r = this.row + 1; r < this.lines.length; r++) {
+            if (this.indents[r] < this.indents[this.row]) break;
+            if (this.indents[r] === this.indents[this.row]) {
+              sib = r;
+              break;
+            }
+          }
+          if (sib < 0) break;
+          this.lines[this.row] = this.lines[this.row] + ' ' + this.lines[sib];
+          this.lines.splice(sib, 1);
+          this.indents.splice(sib, 1);
+        }
+        break;
+      }
+      case 'replayKeys':
+        for (const k of a.keys.slice(0, 32)) this.step(k);
+        break;
       case 'undo': {
         const s = this.undoStack.pop();
         if (s) {
@@ -379,6 +421,7 @@ const MUTATING = new Set<Action['t']>([
   'deleteRemSelection',
   'indentSelection',
   'outdentSelection',
+  'joinRem',
 ]);
 
 function tokenize(seq: string): string[] {
@@ -403,6 +446,8 @@ function tokenize(seq: string): string[] {
           'c-l': 'C-l',
           'c-o': 'C-o',
           'c-i': 'C-i',
+          'c-a': 'C-a',
+          'c-x': 'C-x',
         };
         if (map[name]) {
           out.push(map[name]);

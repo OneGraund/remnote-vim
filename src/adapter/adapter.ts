@@ -98,6 +98,11 @@ export class VimAdapter {
    */
   private jumps: string[] = [];
   private jumpPos = 0;
+  /**
+   * Marks (`m<c>` / `'<c>`): mark name → rem id. The pseudo-mark `'` is
+   * auto-set by every recordJump, so `''` returns to the pre-jump rem.
+   */
+  private marks = new Map<string, string>();
   /** Wildmenu: current command-line suggestions (label shown, complete = full command line it expands to). */
   private suggestions: { label: string; complete: string }[] = [];
   /** Index of the suggestion last applied by Tab (-1 = none applied). */
@@ -193,15 +198,7 @@ export class VimAdapter {
     }
     this.processing = true;
     try {
-      const snap = await this.snapshot();
-      const { state, actions } = handleKey(this.state, sym, snap);
-      this.state = state;
-      for (const a of actions) {
-        // exec sees the pre-action model; update it afterwards so multi-action
-        // commands still compose correctly.
-        await this.exec(a, snap);
-        this.updateModel(a);
-      }
+      await this.applyKey(sym);
     } finally {
       this.processing = false;
     }
@@ -215,6 +212,23 @@ export class VimAdapter {
       this.suggestIdx = -1;
     }
     await this.render();
+  }
+
+  /**
+   * Run one engine key: snapshot → handleKey → execute the emitted actions.
+   * Shared by the live key handler and dot-repeat's `replayKeys` (which
+   * re-feeds recorded keys exactly like real ones, fresh snapshot per key).
+   */
+  private async applyKey(sym: string) {
+    const snap = await this.snapshot();
+    const { state, actions } = handleKey(this.state, sym, snap);
+    this.state = state;
+    for (const a of actions) {
+      // exec sees the pre-action model; update it afterwards so multi-action
+      // commands still compose correctly.
+      await this.exec(a, snap);
+      this.updateModel(a);
+    }
   }
 
   /**
@@ -323,6 +337,8 @@ export class VimAdapter {
       case 'outdentSelection':
       case 'clearRemSelection':
       case 'jump': // the caret lands in a different rem
+      case 'gotoMark': // ditto
+      case 'joinRem': // the focused line's text grew by the joined sibling
       case 'focusPane':
       case 'vExtend': // the selection head physically moves the caret
       case 'yankRemSelection': // native copy parks the caret on the first line
@@ -333,6 +349,8 @@ export class VimAdapter {
       case 'vStart':
       case 'yankRem': // exec restores the caret column itself after native copy
       case 'copyText':
+      case 'setMark': // no document change at all
+      case 'replayKeys': // the replayed keys maintain the model themselves
       case 'collapseSelection': // exec sets model.caret itself
         // newBullet installs its own model in exec; copyText's fallback path
         // maintains the model caret itself in exec; the others don't change
@@ -737,6 +755,61 @@ export class VimAdapter {
         break;
       }
 
+      case 'setMark': {
+        const f = await focus.getFocusedRem();
+        if (f) this.marks.set(a.name, f._id);
+        break;
+      }
+
+      case 'gotoMark': {
+        const id = this.marks.get(a.name);
+        const target = id ? await rem.findOne(id) : null;
+        if (!target) {
+          await this.plugin.app.toast(id ? `Mark points to a deleted rem: ${a.name}` : `Mark not set: ${a.name}`);
+          if (id) this.marks.delete(a.name);
+          break;
+        }
+        await this.recordJump(); // a mark jump is a jumplist entry (and sets ')
+        await this.focusRemById(target._id);
+        break;
+      }
+
+      case 'joinRem': {
+        // vim J: count 1 and 2 both join once; 3gj joins three bullets.
+        const joins = Math.max(1, a.count - 1);
+        for (let i = 0; i < joins; i++) {
+          const focused = await focus.getFocusedRem();
+          if (!focused) break;
+          const parent = await focused.getParentRem();
+          if (!parent) break;
+          // Find the sibling by id in the children list, NOT via
+          // positionAmongstSiblings — that re-query races RemNote's data
+          // layer right after an edit (same hazard as indentSelection, §0)
+          // and can hand back the focused rem as its own "next sibling".
+          const siblings = await parent.getChildrenRem();
+          const idx = siblings.findIndex((s) => s._id === focused._id);
+          const sib = idx >= 0 ? siblings[idx + 1] : undefined;
+          if (!sib || sib._id === focused._id) break;
+          // adopt the sibling's children first, then merge its text in
+          const kids = await sib.getChildrenRem();
+          let at = (focused.children ?? []).length;
+          for (const k of kids) await k.setParent(focused, at++);
+          const fText = (focused.text ?? []) as RichTextInterface;
+          const sText = (sib.text ?? []) as RichTextInterface;
+          await focused.setText([...fText, ' ', ...sText] as RichTextInterface);
+          await sib.remove();
+        }
+        break;
+      }
+
+      case 'replayKeys':
+        // Dot-repeat. Replayed keys can never contain '.' (a replay is not
+        // itself recorded as a change), so this cannot recurse deeper.
+        for (const k of a.keys.slice(0, 32)) {
+          await this.applyKey(k);
+        }
+        break;
+
       case 'mode':
         if (a.mode === 'insert') {
           // Put the *real* caret where the model says before native typing
@@ -825,6 +898,14 @@ export class VimAdapter {
       return;
     }
 
+    // :g/pat/d — delete every bullet of the document whose text matches
+    // (vim's :global; `d` is the only supported sub-command).
+    const glob = cmd.match(/^(?:g|global)\/((?:\\.|[^/])*)(?:\/([a-z]*))?$/i);
+    if (glob) {
+      await this.globalDelete(glob[1], (glob[2] ?? '').toLowerCase());
+      return;
+    }
+
     switch (verb) {
       case 'w':
       case 'write':
@@ -871,6 +952,25 @@ export class VimAdapter {
       case 'ex':
       case 'explore':
         await app.toast('Open the Rem explorer with Ctrl/Cmd-P');
+        return;
+      case 'sort':
+        await this.sortBullets(arg);
+        return;
+      case 't':
+      case 'co':
+      case 'copy':
+        await this.duplicateBullets();
+        return;
+      case 'd':
+      case 'delete':
+        await this.deleteBullets();
+        return;
+      case 'y':
+      case 'yank':
+        await this.yankBullets();
+        return;
+      case 'marks':
+        await this.listMarks();
         return;
       // (:todo/:done/:untodo were removed — RemNote's own slash-command menu
       // on '/' covers rem-type changes; the vim command line only carries
@@ -971,6 +1071,189 @@ export class VimAdapter {
     );
   }
 
+  /**
+   * `:d` — delete the selected bullets (or the focused one) with subtrees,
+   * exactly like `dd`/visual-`d`: register + OS clipboard + caret rescue.
+   */
+  private async deleteBullets() {
+    const targets = await this.exTargets();
+    if (targets.length === 0) {
+      await this.plugin.app.toast('No bullet to delete');
+      return;
+    }
+    this.lineRegister = [];
+    for (const r of targets) this.lineRegister.push(await this.captureSubtree(r));
+    await this.cutRems(targets);
+    this.state = { ...this.state, register: { kind: 'line' } }; // p pastes it back
+    this.invalidateModel();
+  }
+
+  /** `:y` — yank the selected bullets (or the focused one), like `yy`. */
+  private async yankBullets() {
+    const targets = await this.exTargets();
+    if (targets.length === 0) {
+      await this.plugin.app.toast('No bullet to yank');
+      return;
+    }
+    this.lineRegister = [];
+    for (const r of targets) this.lineRegister.push(await this.captureSubtree(r));
+    if (!(await this.nativeClipboardRems(targets.map((r) => r._id)))) {
+      await this.copyRegisterToClipboard();
+    }
+    this.state = { ...this.state, register: { kind: 'line' } };
+    await this.plugin.app.toast(`${targets.length} bullet${targets.length > 1 ? 's' : ''} yanked`);
+  }
+
+  /**
+   * `:t` (also `:co[py]`) — duplicate the selected bullets (or the focused
+   * one) with their subtrees, inserted right below the last selected unit.
+   */
+  private async duplicateBullets() {
+    const targets = await this.exTargets();
+    if (targets.length === 0) {
+      await this.plugin.app.toast('No bullet to duplicate');
+      return;
+    }
+    const last = targets[targets.length - 1];
+    const parent = await last.getParentRem();
+    let at = ((await last.positionAmongstSiblings()) ?? 0) + 1;
+    let firstId: string | null = null;
+    for (const r of targets) {
+      const node = await this.captureSubtree(r);
+      const id = await this.pasteSubtree(node, parent, at++);
+      if (!firstId && id) firstId = id;
+    }
+    if (firstId) await this.walkCaretTo(firstId, 1);
+    this.invalidateModel();
+  }
+
+  /**
+   * `:sort [n] [rev]` — with a visual selection: sort the selected sibling
+   * bullets; without: sort the focused bullet's CHILDREN (the useful outliner
+   * reading of vim's line sort). `n` compares leading numbers, `rev`
+   * reverses (vim's `:sort!` bang is untypeable — shift-blind).
+   */
+  private async sortBullets(arg: string) {
+    const app = this.plugin.app;
+    const flags = new Set(arg.toLowerCase().split(/\s+/).filter(Boolean));
+    const units = await this.vUnits();
+    let rems;
+    let parent;
+    if (units.length >= 2) {
+      parent = await units[0].getParentRem();
+      rems = [];
+      for (const u of units) {
+        const p = await u.getParentRem();
+        if (p?._id === parent?._id) rems.push(u);
+      }
+    } else {
+      const f = await this.plugin.focus.getFocusedRem();
+      if (!f) {
+        await app.toast('Nothing to sort (select bullets or focus a parent)');
+        return;
+      }
+      parent = f;
+      rems = await f.getChildrenRem();
+    }
+    if (!parent || rems.length < 2) {
+      await app.toast('Nothing to sort');
+      return;
+    }
+    const keyed: { r: (typeof rems)[number]; key: string; pos: number }[] = [];
+    for (const r of rems) {
+      keyed.push({
+        r,
+        key: (await this.plugin.richText.toString((r.text ?? []) as RichTextInterface)) ?? '',
+        pos: (await r.positionAmongstSiblings()) ?? 0,
+      });
+    }
+    const minPos = Math.min(...keyed.map((k) => k.pos));
+    keyed.sort((a, b) =>
+      flags.has('n')
+        ? (parseFloat(a.key) || 0) - (parseFloat(b.key) || 0)
+        : a.key.localeCompare(b.key)
+    );
+    if (flags.has('rev')) keyed.reverse();
+    // Refill the block of sibling slots the rems came from, in sorted order.
+    for (let i = 0; i < keyed.length; i++) {
+      await keyed[i].r.setParent(parent, minPos + i);
+    }
+    this.invalidateModel();
+    await app.toast(`${keyed.length} bullets sorted`);
+  }
+
+  /** `:g/pat/d` — delete every matching bullet (subtree included) in the doc. */
+  private async globalDelete(pat: string, cmdFlag: string) {
+    const app = this.plugin.app;
+    if (cmdFlag !== 'd' && cmdFlag !== 'delete') {
+      await app.toast('Only :g/pattern/d is supported');
+      return;
+    }
+    if (!pat) {
+      await app.toast('Usage: :g/pattern/d');
+      return;
+    }
+    let re: RegExp;
+    try {
+      re = new RegExp(pat);
+    } catch {
+      await app.toast(`Bad pattern: /${pat}/`);
+      return;
+    }
+    const paneRemId = await this.plugin.window.getOpenPaneRemId(
+      await this.plugin.window.getFocusedPaneId()
+    );
+    const doc = paneRemId ? await this.plugin.rem.findOne(paneRemId) : null;
+    const all = doc ? (await doc.getDescendants()).slice(0, 500) : [];
+    const matches = [];
+    for (const r of all) {
+      const txt = (await this.plugin.richText.toString((r.text ?? []) as RichTextInterface)) ?? '';
+      if (re.test(txt)) matches.push(r);
+    }
+    // A matching ancestor already takes its subtree — drop covered matches.
+    const ids = new Set(matches.map((r) => r._id));
+    const units = [];
+    for (const r of matches) {
+      let covered = false;
+      let cur: { parent?: string } | null = r as unknown as { parent?: string };
+      for (let hop = 0; cur?.parent && hop < 20; hop++) {
+        if (ids.has(cur.parent)) {
+          covered = true;
+          break;
+        }
+        cur = (await this.plugin.rem.findOne(cur.parent)) as unknown as { parent?: string } | null;
+      }
+      if (!covered) units.push(r);
+    }
+    if (units.length === 0) {
+      await app.toast(`Pattern not found: /${pat}/`);
+      return;
+    }
+    this.lineRegister = [];
+    for (const r of units) this.lineRegister.push(await this.captureSubtree(r));
+    await this.cutRems(units);
+    this.state = { ...this.state, register: { kind: 'line' } };
+    this.invalidateModel();
+    await app.toast(`${units.length} bullet${units.length > 1 ? 's' : ''} deleted`);
+  }
+
+  /** `:marks` — list the set marks in a toast. */
+  private async listMarks() {
+    if (this.marks.size === 0) {
+      await this.plugin.app.toast('No marks set');
+      return;
+    }
+    const parts: string[] = [];
+    for (const [name, id] of this.marks) {
+      const r = await this.plugin.rem.findOne(id);
+      const txt = r
+        ? ((await this.plugin.richText.toString((r.text ?? []) as RichTextInterface)) ?? '')
+        : '(deleted)';
+      parts.push(`${name} → ${txt.slice(0, 24)}`);
+    }
+    await this.plugin.app.toast(`Marks: ${parts.join('  |  ')}`);
+  }
+
   /** Floating widget id of the open :help window, if any. */
   private helpWidgetId: string | null = null;
 
@@ -999,6 +1282,12 @@ export class VimAdapter {
   private static readonly EX_COMMANDS: { verb: string; hint: string; arg?: 'rem' | 'none' }[] = [
     { verb: 'e', hint: 'open document (search)', arg: 'rem' },
     { verb: 's/', hint: 'substitute  s/pat/repl/[gia]', arg: 'none' },
+    { verb: 'g/', hint: 'global delete  g/pat/d', arg: 'none' },
+    { verb: 'sort', hint: 'sort bullets  sort [n] [rev]', arg: 'none' },
+    { verb: 't', hint: 'duplicate bullet(s)', arg: 'none' },
+    { verb: 'd', hint: 'delete bullet(s)', arg: 'none' },
+    { verb: 'y', hint: 'yank bullet(s)', arg: 'none' },
+    { verb: 'marks', hint: 'list marks', arg: 'none' },
     { verb: 'vs', hint: 'vertical split [document]', arg: 'rem' },
     { verb: 'sp', hint: 'horizontal split [document]', arg: 'rem' },
     { verb: 'q', hint: 'close pane', arg: 'none' },
@@ -1300,6 +1589,7 @@ export class VimAdapter {
     this.jumps = this.jumps.slice(0, this.jumpPos);
     if (this.jumps[this.jumps.length - 1] !== f._id) this.jumps.push(f._id);
     this.jumpPos = this.jumps.length;
+    this.marks.set("'", f._id); // vim's automatic ' mark — '' jumps back
   }
 
   /**

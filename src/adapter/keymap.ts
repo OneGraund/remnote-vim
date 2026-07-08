@@ -41,6 +41,11 @@ const named: KeyBinding[] = [
   { spec: 'ctrl+l', sym: 'C-l' },
   { spec: 'ctrl+o', sym: 'C-o' },
   { spec: 'ctrl+i', sym: 'C-i' },
+  // vim Ctrl-A/Ctrl-X (increment/decrement). Overrides RemNote's select-all
+  // in normal mode only; insert mode releases them. Delivery class unknown
+  // until probed — verify with real-input.mjs like every ctrl chord.
+  { spec: 'ctrl+a', sym: 'C-a' },
+  { spec: 'ctrl+x', sym: 'C-x' },
 ];
 
 const plainLetters: KeyBinding[] = letters.map((l) => ({ spec: l, sym: l }));
@@ -50,6 +55,10 @@ const plainPunct: KeyBinding[] = [
   { spec: ',', sym: ',' },
   { spec: '.', sym: '.' },
   { spec: '`', sym: '`' },
+  // marks (`'x`), bracket text objects (di[ / da]) and f-args like f'
+  { spec: "'", sym: "'" },
+  { spec: '[', sym: '[' },
+  { spec: ']', sym: ']' },
   // '/' is deliberately NOT stolen: RemNote's slash-command menu owns it
   // (the vim command line lives on ';').
 ];
@@ -68,7 +77,8 @@ export const INSERT_BINDINGS: KeyBinding[] = [{ spec: 'escape', sym: 'Escape' }]
 // '/' here is the :s separator (`s/foo/bar/g`); the rest make :e arguments
 // with hyphens etc. typeable. Shifted characters stay unreachable
 // (shift-blind stealing), so command syntax must never REQUIRE them.
-const commandExtra: KeyBinding[] = ['/', '-', '=', "'", '[', ']', '\\'].map(
+// (' [ ] moved into the normal-mode set for marks/text objects.)
+const commandExtra: KeyBinding[] = ['/', '-', '=', '\\'].map(
   (c) => ({ spec: c, sym: c })
 );
 export const COMMAND_BINDINGS: KeyBinding[] = [

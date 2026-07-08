@@ -123,6 +123,94 @@ export function findChar(
   }
 }
 
+/**
+ * Text object for a bracket pair (`i(`/`a[`/…): the innermost pair that
+ * contains the char at c (nesting-aware, single line). Vim fails when the
+ * caret is outside any pair — so do we (null). `around` includes the
+ * delimiters themselves.
+ */
+export function pairObject(
+  s: string,
+  c: number,
+  open: string,
+  close: string,
+  around: boolean
+): { start: number; end: number } | null {
+  // Parse the whole line once, collecting matched pairs via a stack.
+  const stack: number[] = [];
+  const pairs: [number, number][] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === open) stack.push(i);
+    else if (s[i] === close && stack.length) pairs.push([stack.pop() as number, i]);
+  }
+  // Innermost pair containing the cursor char = max open among candidates.
+  let best: [number, number] | null = null;
+  for (const [o, cl] of pairs) {
+    if (o <= c && c <= cl && (!best || o > best[0])) best = [o, cl];
+  }
+  if (!best) return null;
+  return around ? { start: best[0], end: best[1] + 1 } : { start: best[0] + 1, end: best[1] };
+}
+
+/**
+ * Text object for a quoted string (`i'`/`a"`/…). Vim pairs quotes up from
+ * the line start (no nesting), uses the pair containing the cursor or else
+ * the NEXT pair after it, and `a` also swallows trailing whitespace after
+ * the closing quote (or leading whitespace when there is none) — mirrored
+ * here. Backslash-escaped quotes don't close.
+ */
+export function quoteObject(
+  s: string,
+  c: number,
+  q: string,
+  around: boolean
+): { start: number; end: number } | null {
+  const idx: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === q && (i === 0 || s[i - 1] !== '\\')) idx.push(i);
+  }
+  let best: [number, number] | null = null;
+  for (let k = 0; k + 1 < idx.length; k += 2) {
+    const [o, cl] = [idx[k], idx[k + 1]];
+    if ((o <= c && c <= cl) || o > c) {
+      best = [o, cl];
+      break; // pairs are in line order; the first containing-or-later wins
+    }
+  }
+  if (!best) return null;
+  if (!around) return { start: best[0] + 1, end: best[1] };
+  let start = best[0];
+  let end = best[1] + 1;
+  const e0 = end;
+  while (end < s.length && /[ \t]/.test(s[end])) end++;
+  if (end === e0) {
+    while (start > 0 && /[ \t]/.test(s[start - 1])) start--;
+  }
+  return { start, end };
+}
+
+/**
+ * Ctrl-A/Ctrl-X: the number under or after the cursor on this line —
+ * vim's rule: the match containing the caret char, else the next one
+ * after it. A '-' immediately before the digits is part of the number.
+ */
+export function numberAt(
+  s: string,
+  c: number
+): { start: number; end: number; value: number } | null {
+  const re = /-?\d+/g;
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    let start = m.index;
+    const end = start + m[0].length;
+    if (end > c) {
+      // A '-' that is part of a word (a-5) is a separator, not a sign.
+      if (s[start] === '-' && start > 0 && /[\dA-Za-z]/.test(s[start - 1])) start++;
+      return { start, end, value: parseInt(s.slice(start, end), 10) };
+    }
+  }
+  return null;
+}
+
 /** Text object `iw`/`aw`: the word (or space run) containing the char at c. */
 export function wordObject(
   s: string,

@@ -15,6 +15,71 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 evening — HANDOFF: new feature batch (marks, text objects, gj/ga, C-a/C-x, dot-repeat, 6 new Ex verbs)
+
+Read this first. A large feature batch is **committed, 153/153 unit-green,
+tsc clean, and MOSTLY live-verified** — the table below says exactly what
+remains. The e2e app on CDP 9223 is running a bundle from BEFORE the last
+`joinRem` fix (see open item 1); webpack dev on 8080 has the current build.
+Daily doc state at handoff: `list` (children `2 two`/`9 nine`/`10 ten`),
+`gamma`, `zeta`.
+
+**What shipped** (all documented in the `:help` sheet — vim_help.tsx — and
+§0.5; keys chosen to be typeable under shift-blind stealing):
+
+| Feature | Impl | Unit | Live-verified? |
+|---|---|---|---|
+| Text objects `ib`/`ab` (=`i(`), `i[`/`a[`, `i'`/`a'`, `` i` ``/`` a` `` for d/c/y and charwise visual (`vi[`) | engine `textObjectFor` + motions `pairObject`/`quoteObject` | ✅ | ✅ `di[`, `dib` (first try hit a FIXTURE race, see gotchas) |
+| Marks: `m<c>` set, `'<c>` jump (a jumplist entry), `''` auto-mark | actions `setMark`/`gotoMark`; adapter `marks` map; `recordJump` sets `'` | ✅ | ✅ `ma`/`ge`/`'a`/`''` toggle |
+| `gj` = vim `J` (join with next sibling; adopts its children; counts) | action `joinRem` | ✅ | ⚠ **works, but see open item 1** |
+| `ga` = vim `A` (append at end of line) | g-chord | ✅ | ✅ |
+| `C-a`/`C-x` number increment/decrement with counts | motions `numberAt`; emits deleteRange+insertText | ✅ | ✅ via CDP (41→42, `5<C-x>`→37). **Delivery class: CDP-visible** (like C-d, unlike C-o). Real-keyboard delivery NOT yet probed — real-input.mjs has the checks, not yet run |
+| Dot-repeat `.` (normal-mode changes only: d/x/r/p/`~`/gj/C-a…; c-family and o are NOT recorded — insert text never reaches the engine) | `keyLog`/`lastChange` in VimState, `recordDotRepeat` wrapper in `handleKey`, action `replayKeys`, adapter `applyKey` extraction | ✅ | ✅ `dw` then `.` |
+| `:sort [n] [rev]` — selection siblings, else focused bullet's children | `sortBullets` | n/a | ✅ all three forms + visual selection |
+| `:t` / `:co[py]` — duplicate bullets below selection | `duplicateBullets` | n/a | ✅ |
+| `:d` / `:y` — delete/yank selection or focused bullet (register + OS clipboard, like dd/yy) | `deleteBullets`/`yankBullets` | n/a | ✅ (`- gamma` and 2-bullet clip:native) |
+| `:g/pat/d` — delete every matching bullet in the doc (subtree incl.) | `globalDelete` | n/a | ❌ **not verified** (open item 2) |
+| `:marks` — list marks in a toast | `listMarks` | n/a | ❌ not verified |
+| Wildmenu catalog + `:help` sheet updated with all of the above (help also gained the previously-missing `:s`/`:vs`/`:sp`/`:q`/`:only` rows) | | | ❌ help rendering not eyeballed |
+| keymap: normal mode now steals `'` `[` `]` (marks/objects/f-args) and `ctrl+a`/`ctrl+x` | | ✅ | ✅ (`[` and `'` proven by di[/ma) |
+
+**Next account's job (in priority order):**
+
+1. **Relaunch the app** (`pkill -f 'remote-debugging-por[t]=9223'` +
+   `./e2e/launch.sh`; the running bundle predates the fix) and **re-verify
+   `gj`**, including `gj` then `.`. Background: the first live `gj` self-joined
+   ("alpha alpha") — `positionAmongstSiblings()` raced the data layer right
+   after an edit and handed back the focused rem as its own next sibling (the
+   same race that bit indentSelection, see 2026-07-07 evening). Fixed by
+   finding the sibling **by id in `getChildrenRem()`** (`findIndex` + guard)
+   instead of the position re-query; fix is committed but NOT live-verified.
+   Dot-repeated `gj .` replays at full speed, so it exercises exactly this race.
+2. **Live-verify `:g/pat/d`**: create two `tmp …` bullets in the daily doc,
+   `;g/tmp/d<cr>` → both deleted (clipboard gets them via cutRems); also check
+   a matching parent takes its whole subtree and covered children are not
+   double-deleted (the `units` ancestor-dedup in `globalDelete`).
+3. **Eyeball `:marks`** (toast) **and the `:help` sheet** (`;help` — new rows:
+   ga, Marks section, dib/gj/C-a/C-x/`.`, expanded Command line section).
+4. **Run the suites** against the relaunched bundle:
+   `REMNOTE_CDP_PORT=9223 VIM_E2E_SETTLE=1600 npm run e2e` (expect 16/16),
+   `… node e2e/stress.mjs` (59/59), and `… node e2e/real-input.mjs` —
+   now **8 checks** (added C-a/C-x; needs the window focused in the
+   compositor — machine runs niri, check `niri msg windows`, ydotool user
+   service must be active).
+5. Optional follow-ups noted while building: `:sort u` (unique) was skipped
+   deliberately (deletes rems — decide semantics first); visual-mode dot
+   repeat not planned; `d'a` (delete to mark) unsupported.
+
+**Harness gotchas (re)confirmed this session — cost real time:**
+
+- **SDK `setText` → immediate click → keystroke = stale local model.** The
+  editor read API lags the data layer (§6), so the adapter caches the OLD
+  text and motions "fail" (a `dib` looked broken this way — it wasn't). After
+  fixture `setText`, press `j k` (or wait ~1 s before clicking) to force a
+  model resync before driving keys. Real typing never hits this.
+- `positionAmongstSiblings()` right after an edit is unreliable (race above);
+  promoted to a §9 bullet since it has now bitten twice.
+
 ### 2026-07-08 later — handoff closed: :s / panes / wildmenu all live-verified; pane-focus fix; cmdline shift-blindness mapped
 
 Picked up the handoff below; every open item is resolved. Suites at the end
@@ -433,11 +498,24 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   visual-line (`v`+`j/k` auto-upgrades) / `;` `/` `:` command line; mode badge
   bottom-right; per-mode key stealing (insert releases everything but Esc).
 - **Motions** — `h l 0 w b e f<c> t<c>` `,`(reverse find repeat), counts;
-  g-chords for shift-blind capitals: `gl`=`$` `gh`=`^` `gg` `ge`=`G`.
+  g-chords for shift-blind capitals: `gl`=`$` `gh`=`^` `gg` `ge`=`G`
+  `ga`=`A` (append at line end).
   `e` uses I-beam semantics (any forward progress counts), so `de` on
   `a asdf` deletes just `a`.
 - **Operators** — `d c y` + motions/text objects (`dw de db dd df<c> dt<c>
   diw daw`), `dgl`=`d$`, `dgh`=`d^`, `x X s S D C`, `r<c>`, backtick=`~`.
+- **Text objects** — `iw aw`, pairs `ib ab`(=`i(`/`a(`) `i[ a[`, quotes
+  `i' a'` `` i` a` `` — under d/c/y and in charwise visual (`vi[`). `i{`/`i"`
+  exist in the engine but are untypeable live (shifted keys).
+- **Marks** — `m<c>` remembers the bullet, `'<c>` jumps back (a jumplist
+  entry; `''` returns to the pre-jump spot); `:marks` lists them.
+- **`gj`** = vim `J`: join the next sibling bullet (space-separated, its
+  children adopted; counts: `3gj`).
+- **`C-a`/`C-x`** — increment/decrement the number under/after the cursor,
+  with counts (CDP-verified; real-keyboard delivery pending real-input run).
+- **Dot-repeat `.`** — repeats the last completed normal-mode change (`dw`,
+  `3x`, `r<c>`, `p`, `gj`, `C-a`…). Changes that enter insert mode (`cw`,
+  `o`) are NOT recorded — inserted text never reaches the engine.
 - **Charwise visual** — `v` + `h/l/w/b/e/f/gl/gh` to shape; `d x c s y p o`;
   `gg/ge/G` escalate to line-wise to the doc boundary.
 - **Visual-line (multi-bullet)** — extend with `j/k`/counts/`gg/ge`; `d`/`x`
@@ -468,7 +546,10 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   `window.setRemWindowTree` RPC; focus follows vim semantics — new pane on
   split, survivor on `:q`); Tab-cycled **wildmenu** of command suggestions
   with live (deduped) `:e`/`:vs`/`:sp` document search. All live-verified
-  2026-07-08.
+  2026-07-08. **Added the same evening** (verification state in the §0
+  handoff table): `:sort [n] [rev]` (selection siblings or focused bullet's
+  children), `:t`/`:co[py]` duplicate, `:d`/`:y` delete/yank bullets (register
+  + OS clipboard like dd/yy), `:g/pat/d` global delete, `:marks`.
 - **New bullets** — `o`/`go`(=`O`) always create a *sibling* (never a child).
 - **Cursor visibility** — cursorline row tint + colored left caret bar
   outside insert mode.
@@ -933,6 +1014,13 @@ against RemNote 1.26.30):
   also restores the caret to the pane's last-focused rem. `setPaneTree()` in
   the adapter is the reference implementation — route new layout writes
   through it.
+- **`positionAmongstSiblings()` races the data layer right after an edit** —
+  it can return a stale position or effectively make a rem its own
+  previous/next sibling. Bit `indentSelection` (2026-07-07, fixed by deriving
+  the destination once per run) and `joinRem` (2026-07-08, fixed by locating
+  the sibling by id in `getChildrenRem()` instead). When you need "the rem
+  next to X" right after a mutation, find X by id in the children list and
+  index from there — don't re-query positions.
 - **SDK `rem.remove()` of a currently-rendered rem leaves a ZOMBIE row** —
   the data layer drops it (reads/search agree) but the open document keeps
   rendering it, and a click focuses the detached rem (a substitute aimed at

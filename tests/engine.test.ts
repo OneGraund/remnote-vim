@@ -1069,3 +1069,260 @@ describe('visual-line across hierarchy (nested trees)', () => {
     expect(e.lines).toEqual(['a']);
   });
 });
+
+describe('text objects (pairs and quotes)', () => {
+  it('di[ deletes inside brackets, da[ includes them', () => {
+    const e = h('foo [bar baz] x', 0, 6);
+    e.keys('di[');
+    expect(e.line).toBe('foo [] x');
+    const e2 = h('foo [bar baz] x', 0, 6);
+    e2.keys('da[');
+    expect(e2.line).toBe('foo  x');
+  });
+
+  it('dib targets parens (vim b block synonym)', () => {
+    const e = h('f(a+b)*2', 0, 3);
+    e.keys('dib');
+    expect(e.line).toBe('f()*2');
+  });
+
+  it('nested pairs pick the innermost', () => {
+    const e = h('a(b(c)d)e', 0, 4);
+    e.keys('dib');
+    expect(e.line).toBe('a(b()d)e');
+  });
+
+  it('pair object with the caret outside any pair is a no-op', () => {
+    const e = h('a(b)c', 0, 0);
+    e.keys('dib');
+    expect(e.line).toBe('a(b)c');
+  });
+
+  it("di' deletes inside quotes; da' swallows trailing space", () => {
+    const e = h("say 'hi ho' now", 0, 6);
+    e.keys("di'");
+    expect(e.line).toBe("say '' now");
+    const e2 = h("say 'hi ho' now", 0, 6);
+    e2.keys("da'");
+    expect(e2.line).toBe('say now');
+  });
+
+  it("ci' before the quotes targets the NEXT quoted string (vim rule)", () => {
+    const e = h("cmd 'arg' end", 0, 0);
+    e.keys("ci'");
+    expect(e.line).toBe("cmd '' end");
+    expect(e.mode).toBe('insert');
+  });
+
+  it('di` handles backticks', () => {
+    const e = h('run `ls -la` now', 0, 6);
+    e.keys('di`');
+    expect(e.line).toBe('run `` now');
+  });
+
+  it('vi[ reshapes a charwise selection to the bracket innards', () => {
+    const e = h('foo [bar baz] x', 0, 6);
+    e.keys('vi[d');
+    expect(e.line).toBe('foo [] x');
+  });
+
+  it("va' selects around the quotes", () => {
+    const e = h("say 'hi' now", 0, 5);
+    e.keys("va'y");
+    expect(e.clipboard).toBe("'hi' ");
+  });
+});
+
+describe('marks', () => {
+  it("m<c> sets a mark, '<c> jumps to it", () => {
+    const e = h(['a', 'b', 'c'], 0, 0);
+    e.keys('ma');
+    expect(e.marks['a']).toBe(0);
+    e.keys('jj');
+    expect(e.row).toBe(2);
+    e.keys("'a");
+    expect(e.row).toBe(0);
+  });
+
+  it("'' returns to the position before the last jump", () => {
+    const e = h(['a', 'b', 'c', 'd'], 3, 0);
+    e.keys('gg'); // jump: records row 3 as '
+    expect(e.row).toBe(0);
+    e.keys("''");
+    expect(e.row).toBe(3);
+    e.keys("''"); // toggles back
+    expect(e.row).toBe(0);
+  });
+
+  it('jump to an unset mark is a no-op', () => {
+    const e = h(['a', 'b'], 1, 0);
+    e.keys("'z");
+    expect(e.row).toBe(1);
+  });
+});
+
+describe('gj (join bullets)', () => {
+  it('gj joins the next sibling with a space', () => {
+    const e = h(['foo', 'bar', 'rest'], 0, 0);
+    e.keys('gj');
+    expect(e.lines).toEqual(['foo bar', 'rest']);
+  });
+
+  it('3gj joins three bullets into one', () => {
+    const e = h(['a', 'b', 'c', 'd'], 0, 0);
+    e.keys('3gj');
+    expect(e.lines).toEqual(['a b c', 'd']);
+  });
+
+  it('gj skips over the current subtree to the next SIBLING', () => {
+    const e = new Harness(['p', 'kid', 'q'], 0, 0, [0, 1, 0]);
+    e.keys('gj');
+    expect(e.lines).toEqual(['p q', 'kid']);
+    expect(e.indents).toEqual([0, 1]);
+  });
+
+  it('gj with no following sibling is a no-op', () => {
+    const e = new Harness(['x', 'top'], 0, 0, [1, 0]);
+    e.keys('gj');
+    expect(e.lines).toEqual(['x', 'top']);
+  });
+
+  it('gj is undoable', () => {
+    const e = h(['foo', 'bar'], 0, 0);
+    e.keys('gj');
+    expect(e.lines).toEqual(['foo bar']);
+    e.keys('u');
+    expect(e.lines).toEqual(['foo', 'bar']);
+  });
+});
+
+describe('ga (append at end of line)', () => {
+  it('ga enters insert with the caret at the line end', () => {
+    const e = h('hello', 0, 1);
+    e.keys('ga!');
+    expect(e.line).toBe('hello!');
+    expect(e.mode).toBe('insert');
+  });
+});
+
+describe('Ctrl-A / Ctrl-X (number increment)', () => {
+  it('increments the number under the cursor', () => {
+    const e = h('a 41 b', 0, 2);
+    e.keys('<c-a>');
+    expect(e.line).toBe('a 42 b');
+  });
+
+  it('decrements with Ctrl-X', () => {
+    const e = h('a 41 b', 0, 3);
+    e.keys('<c-x>');
+    expect(e.line).toBe('a 40 b');
+  });
+
+  it('finds the next number after the cursor', () => {
+    const e = h('x 9', 0, 0);
+    e.keys('<c-a>');
+    expect(e.line).toBe('x 10');
+    // caret on the last digit of the result
+    expect(e.caret).toBe(3);
+  });
+
+  it('applies counts', () => {
+    const e = h('n 10', 0, 2);
+    e.keys('5<c-a>');
+    expect(e.line).toBe('n 15');
+  });
+
+  it('handles negative numbers', () => {
+    const e = h('t -3', 0, 2);
+    e.keys('<c-a>');
+    expect(e.line).toBe('t -2');
+    e.keys('<c-x><c-x>');
+    expect(e.line).toBe('t -4');
+  });
+
+  it('a dash inside a word is a separator, not a sign', () => {
+    const e = h('a-5', 0, 0);
+    e.keys('<c-a>');
+    expect(e.line).toBe('a-6');
+  });
+
+  it('no number on the line is a no-op', () => {
+    const e = h('plain text', 0, 0);
+    e.keys('<c-a>');
+    expect(e.line).toBe('plain text');
+  });
+});
+
+describe('dot-repeat', () => {
+  it('. repeats dw', () => {
+    const e = h('one two three', 0, 0);
+    e.keys('dw');
+    expect(e.line).toBe('two three');
+    e.keys('.');
+    expect(e.line).toBe('three');
+  });
+
+  it('. repeats a counted delete (3x)', () => {
+    const e = h('abcdefgh', 0, 0);
+    e.keys('3x');
+    expect(e.line).toBe('defgh');
+    e.keys('.');
+    expect(e.line).toBe('gh');
+  });
+
+  it('. repeats r at a new position', () => {
+    const e = h('abc', 0, 0);
+    e.keys('rz');
+    expect(e.line).toBe('zbc');
+    e.keys('l.');
+    expect(e.line).toBe('zzc');
+  });
+
+  it('. repeats dd', () => {
+    const e = h(['a', 'b', 'c'], 0, 0);
+    e.keys('dd');
+    expect(e.lines).toEqual(['b', 'c']);
+    e.keys('.');
+    expect(e.lines).toEqual(['c']);
+  });
+
+  it('motions in between do not clobber the last change', () => {
+    const e = h('one two three four', 0, 0);
+    e.keys('dw');
+    e.keys('wl0'); // pure motions
+    e.keys('.');
+    expect(e.line).toBe('three four');
+  });
+
+  it('insert-entering changes (cw) are NOT recorded', () => {
+    const e = h('one two', 0, 0);
+    e.keys('dw'); // recorded
+    e.keys('cx<esc>'); // cw-family: enters insert, must not be recorded
+    const before = e.line;
+    e.keys('.');
+    // '.' replays dw (the last recorded change), not the c-change
+    expect(e.line).toBe(before.split(' ').slice(1).join(' ') || '');
+  });
+
+  it('. repeats Ctrl-A', () => {
+    const e = h('v 5 9', 0, 2);
+    e.keys('<c-a>');
+    expect(e.line).toBe('v 6 9');
+    e.keys('w.');
+    expect(e.line).toBe('v 6 10');
+  });
+
+  it('. before any change is a no-op', () => {
+    const e = h('abc', 0, 0);
+    e.keys('.');
+    expect(e.line).toBe('abc');
+  });
+
+  it('. repeats gj', () => {
+    const e = h(['a', 'b', 'c'], 0, 0);
+    e.keys('gj');
+    expect(e.lines).toEqual(['a b', 'c']);
+    e.keys('.');
+    expect(e.lines).toEqual(['a b c']);
+  });
+});

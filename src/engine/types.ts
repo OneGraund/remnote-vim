@@ -82,6 +82,21 @@ export type Action =
   | { t: 'focusPane'; dir: -1 | 1 }
   /** Jumplist navigation: Ctrl-O (back, -1) / Ctrl-I (forward, +1). */
   | { t: 'jump'; dir: -1 | 1 }
+  /** `m<c>`: remember the focused Rem under a single-char mark name. */
+  | { t: 'setMark'; name: string }
+  /** `'<c>`: jump to a mark (a jumplist entry, like vim). */
+  | { t: 'gotoMark'; name: string }
+  /**
+   * `gj` (vim J): join the focused bullet with its next sibling `count`
+   * times — sibling text appended with a space, its children adopted.
+   */
+  | { t: 'joinRem'; count: number }
+  /**
+   * `.` (dot-repeat): re-feed the recorded keys of the last normal-mode
+   * change through the engine. The executor must run them through the same
+   * key loop it uses for real keys (fresh snapshot per key).
+   */
+  | { t: 'replayKeys'; keys: string[] }
   | { t: 'mode'; mode: Mode };
 
 /** The register: either in-line text or whole-line (Rem) content held by the adapter. */
@@ -97,7 +112,11 @@ export type Pending =
   | { p: 'find'; key: 'f' | 'F' | 't' | 'T' }
   | { p: 'textobj'; key: 'i' | 'a' }
   /** Ctrl-W pressed; waiting for the pane-direction key (h/l/w). */
-  | { p: 'pane' };
+  | { p: 'pane' }
+  /** `m` pressed; waiting for the mark name. */
+  | { p: 'mark' }
+  /** `'` pressed; waiting for the mark name to jump to. */
+  | { p: 'gotoMark' };
 
 export interface VimState {
   mode: Mode;
@@ -115,6 +134,10 @@ export interface VimState {
   head: number;
   /** Command-line mode: text typed after `:` (excludes the leading colon). */
   commandLine: string;
+  /** Dot-repeat: keys of the normal-mode command currently being typed. */
+  keyLog: string[];
+  /** Dot-repeat: keys of the last completed normal-mode CHANGE (`.` replays). */
+  lastChange: string[] | null;
 }
 
 export function initialState(): VimState {
@@ -129,6 +152,8 @@ export function initialState(): VimState {
     anchor: 0,
     head: 0,
     commandLine: '',
+    keyLog: [],
+    lastChange: null,
   };
 }
 

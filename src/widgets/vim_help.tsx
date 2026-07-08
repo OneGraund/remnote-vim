@@ -140,6 +140,7 @@ function VimHelp() {
           <Section title="Start / stop typing">
             <Row keys={['i']} desc="insert text at the cursor" />
             <Row keys={['a']} desc="insert after the cursor" />
+            <Row keys={['g', 'a']} desc="insert at the end of the line  (vim: A)" />
             <Row keys={['o']} desc="new bullet below (start typing)" />
             <Row keys={['g', 'o']} desc="new bullet above" />
             <Row keys={['Esc']} desc="back to NORMAL (commands)" />
@@ -169,6 +170,13 @@ function VimHelp() {
             <Row keys={['Ctrl-i']} desc="forward again" />
             <Row keys={['Ctrl-h', 'Ctrl-l']} desc="focus previous / next pane" />
           </Section>
+
+          <Section title="Marks">
+            <Row keys={['m', '·']} desc="remember this bullet as mark ‘·’" />
+            <Row keys={["'", '·']} desc="jump back to mark ‘·’" />
+            <Row keys={["'", "'"]} desc="back to where the last jump started" />
+            <Row keys={[':marks']} desc="list your marks" />
+          </Section>
         </div>
 
         <div>
@@ -176,9 +184,13 @@ function VimHelp() {
             <Row keys={['x']} desc="delete character" />
             <Row keys={['d', 'w']} desc="delete to next word" />
             <Row keys={['d', 'i', 'w']} desc="delete the word you're in" />
+            <Row keys={['d', 'i', 'b']} desc="delete inside (…)  — also i[ i' i`" />
             <Row keys={['c', 'w']} desc="change word (delete + type)" />
             <Row keys={['r', '·']} desc="replace character with ‘·’" />
             <Row keys={['`']} desc="toggle UPPER/lower case  (vim: ~)" />
+            <Row keys={['g', 'j']} desc="join with the next bullet  (vim: J)" />
+            <Row keys={['Ctrl-a', 'Ctrl-x']} desc="number under cursor +1 / −1" />
+            <Row keys={['.']} desc="repeat the last change" />
             <Row keys={['d', 'd']} desc="cut whole bullet (with children)" />
             <Row keys={['y', 'y']} desc="copy whole bullet" />
             <Row keys={['p']} desc="paste bullet(s) below" />
@@ -202,11 +214,17 @@ function VimHelp() {
           </Section>
 
           <Section title="Command line">
-            <Row keys={[';']} desc="open the : command line" />
+            <Row keys={[';']} desc="open the : command line (Tab completes)" />
             <Row keys={['/']} desc="RemNote's own slash menu (not vim)" />
             <Row keys={[':help']} desc="this window" />
             <Row keys={[':e name']} desc="search + open a page" />
-            <Row keys={[':w', ':q']} desc="save / quit (RemNote autosaves)" />
+            <Row keys={[':s/a/b/']} desc="replace a→b (flags: g all, i case, a doc)" />
+            <Row keys={[':vs', ':sp']} desc="split pane right / below (opt. + name)" />
+            <Row keys={[':q', ':only']} desc="close pane / keep only this pane" />
+            <Row keys={[':sort']} desc="sort selection or children (n = numeric)" />
+            <Row keys={[':t', ':d', ':y']} desc="duplicate / delete / copy bullets" />
+            <Row keys={[':g/x/d']} desc="delete every bullet matching x" />
+            <Row keys={[':w']} desc="save (RemNote autosaves)" />
           </Section>
         </div>
       </div>
