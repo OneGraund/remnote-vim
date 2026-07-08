@@ -68,8 +68,19 @@ no-ops sandboxed) and revisit when RemNote flips the switch (the §9 bullet
 documents how to re-test quickly); (c) ask the RemNote team about the
 native-mode timeline (the switch + settings UI are clearly built, just off).
 (a)+(b) combine naturally. Also still open from the handoff: the §0-item-3
-EOL/block-caret clamping design decision, and the flagged `C-a` on "item 9" /
-negative-number `C-a` / `$~` re-probes.
+EOL/block-caret clamping design decision.
+
+**Flagged re-probes RESOLVED — not bugs, one probe artifact.** All three of
+the handoff's "needs cleaner repro" oddities are the same artifact: the old
+hunt script pressed `$`, which arrives live as **`4`** (shift-blind, §9) and
+became a pending COUNT for the next command. The numbers match exactly:
+`$~`→"ABC" was really `4~` (toggle 4 chars); `C-a` on "item 9"→"item 13" was
+9+**4**; `C-a` on "-3"→"1" was −3+**4**. Harness probes confirm the engine is
+correct: `C-a` "item 9"→"item 10", `C-a` "-3"→"-2" (negatives fine), `C-x`
+"item 10"→"item 9", and `$~`/`gl~` no-op at EOL (I-beam convention — the
+deferred clamping decision, not a defect). Lesson for future live probes:
+never type `$`/shifted keys in a probe sequence; assert the badge is
+count-free between cases.
 
 ### 2026-07-08 — t/T and ea motion bugs FIXED + live-verified (on-char landing); env recovered; block cursor still blocked
 
