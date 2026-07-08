@@ -462,6 +462,9 @@ describe('visual mode (charwise, plain v)', () => {
     expect(e.line).toBe('abc');
     expect(e.mode).toBe('normal');
     expect(e.caret).toBe(2);
+    // the native selection must be COLLAPSED, not left active (user-reported:
+    // Escape kept the selection + RemNote's selection toolbar on screen)
+    expect(e.sel).toBeNull();
   });
 
   it('vv (V) then d deletes the whole line', () => {
@@ -647,12 +650,16 @@ describe('shift-blind synonyms (live-reachable spellings)', () => {
     expect(e.caret).toBe(1);
   });
 
-  it('/ opens the command line too', () => {
+  it('/ does NOT open the command line (RemNote slash menu owns it)', () => {
     const e = h('abc');
     e.keys('/');
-    expect(e.mode).toBe('command');
-    e.keys('todo<cr>');
-    expect(e.lastEx).toBe('todo');
+    expect(e.mode).toBe('normal');
+  });
+
+  it("'/' and '-' are typeable INSIDE the command line (:s syntax, :e args)", () => {
+    const e = h('abc');
+    e.keys(';s/a-b/c/g<cr>');
+    expect(e.lastEx).toBe('s/a-b/c/g');
     expect(e.mode).toBe('normal');
   });
 
@@ -777,6 +784,25 @@ describe('scrolling (Ctrl-D/U)', () => {
   });
 });
 
+describe('panes (Ctrl-W chord, Ctrl-H/Ctrl-L direct)', () => {
+  it('C-w then h/l/w emits focusPane', () => {
+    const e = h('x');
+    e.keys('<c-w>h');
+    expect(e.paneMoves).toEqual([-1]);
+    e.keys('<c-w>l');
+    expect(e.paneMoves).toEqual([-1, 1]);
+    e.keys('<c-w>w');
+    expect(e.paneMoves).toEqual([-1, 1, 1]);
+  });
+
+  it('C-h / C-l switch panes directly (desktop app never delivers C-w)', () => {
+    const e = h('x');
+    e.keys('<c-h><c-l><c-l>');
+    expect(e.paneMoves).toEqual([-1, 1, 1]);
+    expect(e.mode).toBe('normal');
+  });
+});
+
 describe('jumplist (Ctrl-O / Ctrl-I)', () => {
   const doc = () => ['a', 'b', 'c', 'd', 'e'];
 
@@ -867,27 +893,26 @@ describe('command line over a visual selection', () => {
     e.keys(';');
     expect(e.mode).toBe('command');
     expect(e.vSelRows).toEqual([0, 1]); // selection survives into command mode
-    e.keys('todo<cr>');
-    expect(e.lastEx).toBe('todo');
+    e.keys('noop<cr>');
+    expect(e.lastEx).toBe('noop');
     expect(e.mode).toBe('normal');
     expect(e.vSelRows).toBeNull(); // and is cleared afterwards
   });
 
-  it('/ from visual-line opens the command line the same way', () => {
+  it('/ from visual-line does NOT open the command line (slash menu owns it)', () => {
     const e = h(['one', 'two'], 0);
     e.keys('vj/');
-    expect(e.mode).toBe('command');
-    expect(e.vSelRows).toEqual([0, 1]);
+    expect(e.mode).toBe('visual-line');
     e.keys('<esc>');
     expect(e.mode).toBe('normal');
-    expect(e.vSelRows).toBeNull(); // escape clears it too
+    expect(e.vSelRows).toBeNull();
   });
 
   it('documents are untouched by a selection command round-trip', () => {
     const e = h(['one', 'two', 'three'], 0);
-    e.keys('vj;done<cr>');
+    e.keys('vj;noop<cr>');
     expect(e.lines).toEqual(['one', 'two', 'three']);
-    expect(e.lastEx).toBe('done');
+    expect(e.lastEx).toBe('noop');
   });
 });
 

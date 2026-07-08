@@ -37,13 +37,20 @@ export function handleKey(state: VimState, key: string, snap: Snapshot): EngineR
 
 const PAGE = 12; // Rems moved by Ctrl-D / Ctrl-U
 
-function handleCommand(state: VimState, key: string, _snap: Snapshot): EngineResult {
-  // Command mode can be entered from visual-line with the bullet selection
-  // kept alive (so :todo & friends can act on it). Leaving command mode —
-  // by running a command or cancelling — always drops that selection.
+function handleCommand(state: VimState, key: string, snap: Snapshot): EngineResult {
+  // Command mode can be entered from visual/visual-line with the selection
+  // kept alive (so range commands can act on it). Leaving command mode — by
+  // running a command or cancelling — always drops that selection: the rem
+  // trail via clearRemSelection AND any native charwise text selection via
+  // collapseSelection (entered-from-`v` case).
   const leave = (actions: Action[]): EngineResult => ({
     state: { ...state, mode: 'normal', commandLine: '' },
-    actions: [...actions, { t: 'clearRemSelection' }, { t: 'mode', mode: 'normal' }],
+    actions: [
+      ...actions,
+      { t: 'clearRemSelection' },
+      { t: 'collapseSelection', at: snap.caret },
+      { t: 'mode', mode: 'normal' },
+    ],
   });
   if (key === 'Escape') {
     return leave([]);
@@ -406,6 +413,14 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
       return reset(state, [{ t: 'scroll', dir: -1, count: PAGE }]);
     case 'C-w':
       return { state: { ...state, pending: { p: 'pane' }, count: '' }, actions: [] };
+    // Direct pane nav (vim's common `<C-h>`/`<C-l>` ↦ `<C-w>h`/`<C-w>l`
+    // mapping). These exist because a real Ctrl+W never reaches the desktop
+    // app's renderer (Electron eats it) — C-w above only works on hosts that
+    // deliver it.
+    case 'C-h':
+      return reset(state, [{ t: 'focusPane', dir: -1 }]);
+    case 'C-l':
+      return reset(state, [{ t: 'focusPane', dir: 1 }]);
 
     // --- jumplist
     case 'C-o':
@@ -415,10 +430,11 @@ function handleNormal(state: VimState, key: string, snap: Snapshot): EngineResul
 
     // --- command-line mode. ':' is unreachable live (shift-blind stealing
     // reports it as ';'), so ';' doubles as ':' — always, now that the
-    // find-repeat meaning of ';' is retired. '/' opens it too.
+    // find-repeat meaning of ';' is retired. '/' is deliberately NOT ours:
+    // it is not stolen at all, so RemNote's own slash-command menu opens
+    // (user's call — RemNote commands stay on /, vim Ex lives on ;).
     case ':':
     case ';':
-    case '/':
       return { state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } }, actions: [{ t: 'mode', mode: 'command' }] };
 
     case 'Escape':
@@ -541,7 +557,11 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
   const n = text.length;
 
   if (key === 'Escape') {
-    return toMode(state, 'normal', [{ t: 'setCaret', at: clamp(state.head, 0, n) }]);
+    // collapseSelection, not setCaret: a relative caret move against the
+    // live native selection resizes it instead of clearing it.
+    return toMode(state, 'normal', [
+      { t: 'collapseSelection', at: clamp(state.head, 0, n) },
+    ]);
   }
 
   // g-chords: gg/ge escalate to a line-wise selection reaching the document
@@ -663,11 +683,10 @@ function handleVisual(state: VimState, key: string, snap: Snapshot): EngineResul
     case '<':
       return toMode(state, 'normal', [{ t: 'outdent' }]);
 
-    // command line from charwise visual: :todo & friends act on the focused
-    // bullet (no multi-bullet trail exists in this sub-mode)
+    // command line from charwise visual — range commands (:s) act on the
+    // focused bullet ('/' is not stolen; it belongs to RemNote's slash menu)
     case ':':
     case ';':
-    case '/':
       return {
         state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } },
         actions: [{ t: 'mode', mode: 'command' }],
@@ -746,11 +765,11 @@ function handleVisualLine(state: VimState, key: string, snap: Snapshot): EngineR
       return { state, actions: [] };
 
     // command line over the selection: the bullet trail is deliberately NOT
-    // cleared, so Ex commands (:todo, :done, …) apply to every selected
-    // bullet. Leaving command mode clears it.
+    // cleared, so range Ex commands (:s over the selection) apply to every
+    // selected bullet. Leaving command mode clears it. ('/' is not stolen —
+    // RemNote's slash menu owns it.)
     case ':':
     case ';':
-    case '/':
       return {
         state: { ...state, mode: 'command', commandLine: '', count: '', op: null, pending: { p: 'none' } },
         actions: [{ t: 'mode', mode: 'command' }],

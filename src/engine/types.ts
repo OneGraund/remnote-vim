@@ -20,6 +20,17 @@ export type Action =
   | { t: 'setCaret'; at: number }
   | { t: 'select'; start: number; end: number }
   /**
+   * Leave visual mode: collapse any active NATIVE text selection and place
+   * the caret at `at`. Distinct from setCaret because a plain relative
+   * moveCaret against a live selection shrinks/extends it instead of
+   * collapsing (observed live: Escape from `v ll` left "be" selected and the
+   * selection toolbar open). When a text selection is active, a collapsed
+   * selectText range is the one API that both clears it AND sets the caret
+   * absolutely; with no selection the adapter falls back to the setCaret
+   * relative-move path.
+   */
+  | { t: 'collapseSelection'; at: number }
+  /**
    * `yank: true` marks register-worthy deletes (x, dw, visual d, c, s, …):
    * the adapter routes them through the editor's native CUT so the removed
    * text also lands on the system clipboard, vim `clipboard=unnamed` style.

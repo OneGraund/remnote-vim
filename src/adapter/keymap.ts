@@ -31,7 +31,14 @@ const named: KeyBinding[] = [
   { spec: 'ctrl+u', sym: 'C-u' },
   // Ctrl-E/Ctrl-Y are NOT stolen: RemNote has no view-scroll API, so the vim
   // behavior (scroll without moving the cursor) cannot be implemented.
+  // Ctrl-W is stolen but NEVER ARRIVES on the desktop app: Electron consumes
+  // a real Ctrl+W before the renderer sees it (verified with kernel-level
+  // uinput — the keydown never fires; CDP-synthesized input bypasses that
+  // layer, so CDP tests are blind to it). Kept for hosts that deliver it;
+  // Ctrl-H/Ctrl-L below are the reachable pane-nav bindings.
   { spec: 'ctrl+w', sym: 'C-w' },
+  { spec: 'ctrl+h', sym: 'C-h' },
+  { spec: 'ctrl+l', sym: 'C-l' },
   { spec: 'ctrl+o', sym: 'C-o' },
   { spec: 'ctrl+i', sym: 'C-i' },
 ];
@@ -43,7 +50,8 @@ const plainPunct: KeyBinding[] = [
   { spec: ',', sym: ',' },
   { spec: '.', sym: '.' },
   { spec: '`', sym: '`' },
-  { spec: '/', sym: '/' },
+  // '/' is deliberately NOT stolen: RemNote's slash-command menu owns it
+  // (the vim command line lives on ';').
 ];
 
 export const NORMAL_BINDINGS: KeyBinding[] = [
@@ -55,7 +63,21 @@ export const NORMAL_BINDINGS: KeyBinding[] = [
 
 export const INSERT_BINDINGS: KeyBinding[] = [{ spec: 'escape', sym: 'Escape' }];
 
-export const ALL_BINDINGS: KeyBinding[] = NORMAL_BINDINGS;
+// While TYPING a command line every printable key must reach the engine, not
+// the document underneath — including keys normal mode leaves to RemNote.
+// '/' here is the :s separator (`s/foo/bar/g`); the rest make :e arguments
+// with hyphens etc. typeable. Shifted characters stay unreachable
+// (shift-blind stealing), so command syntax must never REQUIRE them.
+const commandExtra: KeyBinding[] = ['/', '-', '=', "'", '[', ']', '\\'].map(
+  (c) => ({ spec: c, sym: c })
+);
+export const COMMAND_BINDINGS: KeyBinding[] = [
+  ...NORMAL_BINDINGS,
+  ...commandExtra,
+  { spec: 'tab', sym: 'Tab' }, // wildmenu completion cycling
+];
+
+export const ALL_BINDINGS: KeyBinding[] = COMMAND_BINDINGS;
 
 /**
  * Map an is-hotkey spec (as reported by RemNote's steal event) to an engine
@@ -67,5 +89,7 @@ for (const b of ALL_BINDINGS) {
 }
 
 export function bindingsForMode(mode: string): KeyBinding[] {
-  return mode === 'insert' ? INSERT_BINDINGS : NORMAL_BINDINGS;
+  if (mode === 'insert') return INSERT_BINDINGS;
+  if (mode === 'command') return COMMAND_BINDINGS;
+  return NORMAL_BINDINGS;
 }

@@ -15,6 +15,43 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-07 late night — Ctrl-W was dead at real keyboards; C-h/C-l pane nav + real-input e2e
+
+User report: Ctrl-W → h/l did nothing in real usage although the e2e passed.
+**Root cause: Electron consumes a real Ctrl+W in the main process — the
+renderer (and thus RemNote's key steal) never sees the keydown.** Proved with
+kernel-level uinput (ydotool through the compositor, identical to a physical
+keyboard): a real `h` arrives (badge rx increments), a real Ctrl+W does not;
+a page-level capture listener logged real C-h/C-l/C-j/C-k/C-o/C-i all
+arriving — only C-w is eaten. The CDP suites synthesize input inside the
+renderer, bypassing Electron, which is why they lied. §9 has the new blocker
+entry.
+
+Fix + hardening:
+
+- **`Ctrl-H` / `Ctrl-L` = focus previous/next pane** (the classic vim
+  `<C-h>`/`<C-w>h` remap). Stolen + handled in normal mode; `C-w` chord kept
+  for hosts that deliver it (web?). Help sheet now lists Ctrl-h/Ctrl-l only.
+- **New `e2e/real-input.mjs`** (§7): ydotool-based key-DELIVERY test — real
+  `h`, real C-h/C-l must reach the steal; documents the C-w hole (warns if a
+  platform change ever makes it arrive). Requires the window focused +
+  `systemctl --user start ydotool` (user has a udev ACL on /dev/uinput).
+- Harness `focusPane` now records `paneMoves` so pane bindings are
+  unit-assertable; tests for `C-w h/l/w` and direct `C-h`/`C-l`. 118/118.
+- **Verified end-to-end with real input**: with a real split open, physical
+  Ctrl+H switched `getFocusedPaneId()` to the left pane, Ctrl+L back —
+  through the full kernel → compositor → Electron → steal path.
+
+Env note: the machine runs **niri**, not Hyprland (CLAUDE.md is stale on
+this); the e2e RemNote is an XWayland window. Real input via `ydotool`
+(uinput) works regardless of compositor.
+
+NEXT (user-directed, in order): bug-hunt current functionality live; release
+`/` (RemNote's slash menu must open; `;` is the only command-line key) and
+drop `:todo`/`:done`/`:untodo`; add `:vsplit`/`:s`-style Ex commands
+(pane-open path still unknown — SDK has none; shift+click is the only known
+trigger); command-line suggestions (wildmenu) incl. `:e` document completion.
+
 ### 2026-07-07 night — handoff batch closed: all ☐ probes verified, visual-`e` fix
 
 Picked up the evening handoff below; every open item is now resolved.
@@ -282,7 +319,9 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   `clip:exec`/`clip:FAIL`).
 - **Jumplist** — `Ctrl-O`/`Ctrl-I` over `gg`/`ge`/`:e` jumps (vim
   truncate-forward semantics).
-- **Panes** — `Ctrl-W` then `h`/`l`/`w`.
+- **Panes** — `Ctrl-H`/`Ctrl-L` focus previous/next pane (the vim-classic
+  `C-w h`/`C-w l` chord is also bound but a real Ctrl+W never reaches the
+  desktop app — Electron eats it; see §9).
 - **Scrolling** — `Ctrl-D`/`Ctrl-U` (caret page-moves; view follows).
   `Ctrl-E`/`Ctrl-Y` deliberately unbound — no view-scroll API exists.
 - **Command line** — `:help` cheat sheet; `:todo`/`:done`/`:untodo` act on
@@ -652,6 +691,24 @@ Handy for reproducing a live bug interactively before writing it into
 `stress.mjs`/`tree.mjs` as a regression check, or for reading the debug badge
 live (`eval "getComputedStyle(document.body,'::before').content"`).
 
+### Real-input delivery test — `e2e/real-input.mjs`
+
+The CDP suites synthesize input inside the renderer and therefore CANNOT see
+keys the Electron main process eats (real Ctrl+W — §9). This script sends
+kernel-level uinput events via **ydotool** — the identical path to a physical
+keyboard — and asserts on what actually reaches the plugin's key steal (read
+from the debug badge):
+
+```bash
+systemctl --user start ydotool        # once per session (user service exists)
+REMNOTE_CDP_PORT=9223 node e2e/real-input.mjs
+```
+
+The e2e RemNote window must be FOCUSED in the compositor (real keys go to the
+focused window; the script aborts otherwise instead of typing into whatever
+else is focused). Run this whenever you add a modifier-chord binding — a
+chord that passes the CDP suites can still be dead at a real keyboard.
+
 ### SDK REPL — `e2e/sdk-repl.mjs`
 
 Runs an async JS body *inside the sandboxed plugin iframe*, with `a` bound to
@@ -743,6 +800,15 @@ against RemNote 1.26.30):
   open RemNote's selection-actions popup. Use `nativeClipboardRems` as the
   reference implementation; visual-line mode still uses the CSS-tint trail
   (a persistent native selection would keep the caret dead between keys).
+- **A real Ctrl+W NEVER reaches the renderer on the desktop app** — Electron
+  consumes it in the main process before any web content sees it (verified
+  with kernel-level uinput via ydotool: the keydown never fires in the page,
+  while Ctrl+H/L/J/K/O/I all arrive). **CDP tests are blind to this**:
+  CDP-synthesized input is injected inside the renderer, bypassing the
+  Electron layer, so a `C-w` binding looks green over CDP and is dead at a
+  real keyboard. Any new modifier-chord binding must be verified with
+  `e2e/real-input.mjs` (§7) before trusting it. Pane nav therefore lives on
+  Ctrl-H/Ctrl-L (the `C-w` chord stays bound for hosts that deliver it).
 - **RemNote can boot with `pointer-events-none` stuck on
   `.rn-editor-container`** (suppress-mouse-while-typing state that never
   clears when no real pointer enters the window — an e2e/CDP hazard more

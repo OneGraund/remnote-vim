@@ -10,6 +10,7 @@
 // All work is scoped to today's Daily Document (Rem-ancestor checks), exactly
 // like run.mjs. Prereqs identical to run.mjs.
 import { chromium } from 'playwright-core';
+import { resolveDailyDocId, dailyPaneScope } from './docid.mjs';
 
 const PORT = process.env.REMNOTE_CDP_PORT ?? '9222';
 const SETTLE = Number(process.env.VIM_E2E_SETTLE ?? 900);
@@ -65,8 +66,9 @@ async function keys(seq) {
   await waitIdle();
   await wait(380);
 }
-const DOC_ID = await page.evaluate(() => location.href.match(/-([A-Za-z0-9]+)$/)?.[1] ?? null);
+const DOC_ID = await resolveDailyDocId(page);
 if (!DOC_ID) { console.error("✗ open today's Daily Document first"); process.exit(2); }
+const paneScope = () => dailyPaneScope(page, DOC_ID); // see run.mjs — split-pane duplicate guard
 console.log('· stress test scoped to daily doc', DOC_ID);
 
 // Strip RemNote's stuck `pointer-events-none` typing-suppression state — see
@@ -75,9 +77,9 @@ await page.evaluate(() =>
   document.querySelector('.rn-editor-container')?.classList.remove('pointer-events-none'));
 
 async function scopedBullets() {
-  return page.evaluate((docId) => {
+  return page.evaluate(({ docId, pane }) => {
     const out = [];
-    for (const c of document.querySelectorAll('.EditorContainer')) {
+    for (const c of document.querySelectorAll(pane + '.EditorContainer')) {
       const id = c.closest('[data-rem-id]')?.getAttribute('data-rem-id');
       if (!id) continue;
       let cur = window.Rem(window.CURRENT_KNOWLEDGE_BASE).findOne(id);
@@ -92,7 +94,7 @@ async function scopedBullets() {
       out.push({ id, text: c.textContent.replace(/ |​/g, ' ').trim(), x: r.x + Math.min(25, r.width / 2 + 5), y: r.y + r.height / 2 });
     }
     return out;
-  }, DOC_ID);
+  }, { docId: DOC_ID, pane: await paneScope() });
 }
 const texts = async () => (await scopedBullets()).map((b) => b.text);
 async function clickBullet(t) {

@@ -12,6 +12,7 @@
 // Prereqs: RemNote with --remote-debugging-port, dev plugin enabled, today's
 // Daily Document open.
 import { chromium } from 'playwright-core';
+import { resolveDailyDocId, dailyPaneScope } from './docid.mjs';
 import { mkdirSync } from 'node:fs';
 
 const PORT = process.env.REMNOTE_CDP_PORT ?? '9222';
@@ -67,17 +68,18 @@ async function keys(seq) {
   await waitIdle();
   await wait(320);
 }
-const DOC_ID = await page.evaluate(() => location.href.match(/-([A-Za-z0-9]+)$/)?.[1] ?? null);
+const DOC_ID = await resolveDailyDocId(page);
 if (!DOC_ID) { console.error("✗ open today's Daily Document first"); process.exit(2); }
+const paneScope = () => dailyPaneScope(page, DOC_ID); // see run.mjs — split-pane duplicate guard
 console.log('· tree e2e scoped to daily doc', DOC_ID, '— shots in e2e/shots/');
 
 // ---- channel readers ------------------------------------------------------
 // rows: [{id, text, depth, tinted}] in visual order, scoped to the daily doc
 async function rows() {
-  return page.evaluate((docId) => {
+  return page.evaluate(({ docId, pane }) => {
     const TINT = '217, 119, 6';
     const out = [];
-    for (const c of document.querySelectorAll('.EditorContainer')) {
+    for (const c of document.querySelectorAll(pane + '.EditorContainer')) {
       const wrap = c.closest('[data-rem-id]');
       const id = wrap?.getAttribute('data-rem-id');
       if (!id) continue;
@@ -112,7 +114,7 @@ async function rows() {
       });
     }
     return out;
-  }, DOC_ID);
+  }, { docId: DOC_ID, pane: await paneScope() });
 }
 const parentText = async (t) => {
   const all = await rows();

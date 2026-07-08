@@ -167,7 +167,7 @@ function VimHelp() {
             <Row keys={['Ctrl-u']} desc="half page up" />
             <Row keys={['Ctrl-o']} desc="back to before the last gg/ge/:e jump" />
             <Row keys={['Ctrl-i']} desc="forward again" />
-            <Row keys={['Ctrl-w', 'h/l']} desc="focus previous / next pane" />
+            <Row keys={['Ctrl-h', 'Ctrl-l']} desc="focus previous / next pane" />
           </Section>
         </div>
 
@@ -202,10 +202,8 @@ function VimHelp() {
           </Section>
 
           <Section title="Command line">
-            <Row keys={[';']} desc="open the : command line (also /)" />
-            <Row keys={[':todo']} desc="make selected bullet(s) todos" />
-            <Row keys={[':done']} desc="check them off" />
-            <Row keys={[':untodo']} desc="remove the todo checkbox" />
+            <Row keys={[';']} desc="open the : command line" />
+            <Row keys={['/']} desc="RemNote's own slash menu (not vim)" />
             <Row keys={[':help']} desc="this window" />
             <Row keys={[':e name']} desc="search + open a page" />
             <Row keys={[':w', ':q']} desc="save / quit (RemNote autosaves)" />

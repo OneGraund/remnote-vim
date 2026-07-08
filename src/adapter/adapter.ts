@@ -34,6 +34,17 @@ interface RegisterNode {
   children: RegisterNode[];
 }
 
+/**
+ * Pane-layout node accepted by the (undocumented) `window.setRemWindowTree`
+ * host RPC — react-mosaic shape, probed live: a leaf is a rem id string, a
+ * split is {direction, first, second, splitPercentage}. 'row' = side by side
+ * (:vsplit), 'column' = stacked (:split). There is no matching getter, so
+ * layouts are rebuilt flat from getOpenPaneRemIds when panes change.
+ */
+type PaneNode =
+  | string
+  | { direction: 'row' | 'column'; first: PaneNode; second: PaneNode; splitPercentage: number };
+
 const MODE_COLORS: Record<Mode, string> = {
   normal: '#7c3aed',
   insert: '#059669',
@@ -87,6 +98,12 @@ export class VimAdapter {
    */
   private jumps: string[] = [];
   private jumpPos = 0;
+  /** Wildmenu: current command-line suggestions (label shown, complete = full command line it expands to). */
+  private suggestions: { label: string; complete: string }[] = [];
+  /** Index of the suggestion last applied by Tab (-1 = none applied). */
+  private suggestIdx = -1;
+  /** Monotonic counter so stale async search results can't overwrite newer ones. */
+  private suggestSeq = 0;
 
   constructor(private plugin: RNPlugin) {
     // Dev/e2e introspection hook: lets the CDP harness call SDK methods
@@ -166,6 +183,14 @@ export class VimAdapter {
     if (sym === 'Escape' && this.helpWidgetId) {
       await this.closeHelp();
     }
+    // Tab in command mode cycles the wildmenu — an adapter concern (the
+    // candidates come from async searches the pure engine can't run).
+    if (this.state.mode === 'command' && sym === 'Tab') {
+      this.cycleCompletion();
+      this.dbgDone++;
+      await this.render();
+      return;
+    }
     this.processing = true;
     try {
       const snap = await this.snapshot();
@@ -181,6 +206,14 @@ export class VimAdapter {
       this.processing = false;
     }
     this.dbgDone++;
+    // Recompute wildmenu suggestions for the new command line (async; fire
+    // and forget — render() runs again when they arrive).
+    if (this.state.mode === 'command') {
+      void this.updateSuggestions();
+    } else if (this.suggestions.length) {
+      this.suggestions = [];
+      this.suggestIdx = -1;
+    }
     await this.render();
   }
 
@@ -300,6 +333,7 @@ export class VimAdapter {
       case 'vStart':
       case 'yankRem': // exec restores the caret column itself after native copy
       case 'copyText':
+      case 'collapseSelection': // exec sets model.caret itself
         // newBullet installs its own model in exec; copyText's fallback path
         // maintains the model caret itself in exec; the others don't change
         // the focused line's text. Insert-mode exit is reconciled separately.
@@ -332,6 +366,26 @@ export class VimAdapter {
         await editor.selectText({ start: a.start, end: a.end });
         this.lastCaret = a.end;
         break;
+
+      case 'collapseSelection': {
+        // Clear an active native text selection AND set the caret. A
+        // collapsed selectText both collapses the selection and places the
+        // caret ABSOLUTELY — the one case where absolute caret setting works
+        // (verified live; with no selection it is a no-op, hence the
+        // relative-move fallback mirroring setCaret).
+        const to = clamp(a.at, 0, this.model?.text.length ?? a.at);
+        const sel = await editor.getSelection();
+        if (sel && sel.type === SelectionType.Text) {
+          await editor.selectText({ start: to, end: to });
+        } else {
+          const from = this.model?.caret ?? this.lastCaret;
+          const delta = to - from;
+          if (delta !== 0) await editor.moveCaret(delta, MoveUnit.CHARACTER);
+        }
+        if (this.model) this.model.caret = to;
+        this.lastCaret = to;
+        break;
+      }
 
       case 'deleteRange': {
         // If the deletion starts at column 0, extend it over any whitespace
@@ -522,6 +576,13 @@ export class VimAdapter {
       }
 
       case 'vStart': {
+        // Entering visual-line often comes from charwise visual (v→vv, v→j);
+        // kill the lingering native text selection or it (and RemNote's
+        // selection toolbar) stays on screen for the whole line-wise session.
+        const sel = await editor.getSelection();
+        if (sel && sel.type === SelectionType.Text && this.model) {
+          await editor.selectText({ start: this.model.caret, end: this.model.caret });
+        }
         const focused = await focus.getFocusedRem();
         this.dbgV = `anch:${focused ? 'ok' : 'NULL'}`;
         if (!focused) break;
@@ -750,6 +811,20 @@ export class VimAdapter {
     const verb = verbRaw.toLowerCase();
     const arg = restParts.join(' ').trim();
     const app = this.plugin.app;
+
+    // :s/pat/repl/[flags] — the separator touches the verb (no whitespace),
+    // so it can't go through the verb switch. Vim's range prefixes are
+    // untypeable live ('%' arrives as '5', '<'/'>' as ','/'.'): the visual
+    // selection is the implicit range instead (vim-style), and the `a` flag
+    // spells "all bullets of the current document" (vim's %).
+    const subst = cmd.match(
+      /^s(?:ubstitute)?\/((?:\\.|[^/])*)(?:\/((?:\\.|[^/])*)(?:\/([a-z]*))?)?$/i
+    );
+    if (subst) {
+      await this.substitute(subst[1], subst[2] ?? '', (subst[3] ?? '').toLowerCase());
+      return;
+    }
+
     switch (verb) {
       case 'w':
       case 'write':
@@ -765,7 +840,22 @@ export class VimAdapter {
       case 'q':
       case 'q!':
       case 'quit':
-        // Nothing destructive to do in an always-saved outliner; no-op.
+        // vim semantics: with a split open, :q closes the focused pane;
+        // on the last pane there is nothing to quit (always-saved outliner).
+        await this.closePane();
+        return;
+      case 'vs':
+      case 'vsp':
+      case 'vsplit':
+        await this.splitPane('row', arg);
+        return;
+      case 'sp':
+      case 'split':
+        await this.splitPane('column', arg);
+        return;
+      case 'on':
+      case 'only':
+        await this.onlyPane();
         return;
       case 'e':
       case 'edit':
@@ -782,22 +872,9 @@ export class VimAdapter {
       case 'explore':
         await app.toast('Open the Rem explorer with Ctrl/Cmd-P');
         return;
-      // --- bulk commands: act on the visual-line selection when one is
-      // active (command mode entered with ; or / from visual mode), else on
-      // the focused bullet.
-      case 'todo':
-        await this.applyToTargets('→ todo', (r) => r.setIsTodo(true));
-        return;
-      case 'done':
-        await this.applyToTargets('→ done', async (r) => {
-          await r.setIsTodo(true);
-          await r.setTodoStatus('Finished');
-        });
-        return;
-      case 'untodo':
-      case 'notodo':
-        await this.applyToTargets('todo removed', (r) => r.setIsTodo(false));
-        return;
+      // (:todo/:done/:untodo were removed — RemNote's own slash-command menu
+      // on '/' covers rem-type changes; the vim command line only carries
+      // things RemNote has no native affordance for.)
       case 'help':
       case 'h':
         await this.openHelp();
@@ -815,19 +892,83 @@ export class VimAdapter {
     return f ? [f] : [];
   }
 
-  private async applyToTargets(
-    label: string,
-    fn: (r: { setIsTodo: (b: boolean) => Promise<void>; setTodoStatus: (s: 'Finished' | 'Unfinished') => Promise<void> }) => Promise<void>
-  ) {
-    const targets = await this.exTargets();
-    if (targets.length === 0) {
-      await this.plugin.app.toast('No bullet selected');
+  /**
+   * `:s/pat/repl/[flags]` — vim substitute over RemNote rich text.
+   *
+   * Pattern/replacement use JS regex semantics (vim's \1 backrefs are
+   * translated to $1). Flags: `g` = every match per text run (else first
+   * match per bullet), `i` = ignore case, `a` = all bullets of the current
+   * document (vim's untypeable `%`). Range: the visual selection when one is
+   * active, else the focused bullet. Only PLAIN string segments of the rich
+   * text are touched — references/formatting objects are left intact, and a
+   * match can't span across them.
+   */
+  private async substitute(pat: string, repl: string, flags: string) {
+    const app = this.plugin.app;
+    if (!pat) {
+      await app.toast('Usage: :s/pattern/replacement/[gia]');
       return;
     }
-    for (const r of targets) {
-      await fn(r as unknown as Parameters<typeof fn>[0]);
+    let re: RegExp;
+    try {
+      re = new RegExp(pat, `${flags.includes('g') ? 'g' : ''}${flags.includes('i') ? 'i' : ''}`);
+    } catch {
+      await app.toast(`Bad pattern: /${pat}/`);
+      return;
     }
-    await this.plugin.app.toast(`${targets.length} bullet${targets.length > 1 ? 's' : ''} ${label}`);
+    // Escaped separators arrive as '\/'; vim backrefs \1..\9 become JS $1..$9.
+    const replacement = repl.replace(/\\\//g, '/').replace(/\\(\d)/g, '$$$1');
+
+    let targets = await this.exTargets();
+    if (flags.includes('a')) {
+      const paneRemId = await this.plugin.window.getOpenPaneRemId(
+        await this.plugin.window.getFocusedPaneId()
+      );
+      const doc = paneRemId ? await this.plugin.rem.findOne(paneRemId) : null;
+      const all = doc ? await doc.getDescendants() : [];
+      if (all.length > 0) targets = all.slice(0, 500);
+    }
+    if (targets.length === 0) {
+      await app.toast('No bullet to act on');
+      return;
+    }
+
+    const focusedId = (await this.plugin.focus.getFocusedRem())?._id;
+    let bullets = 0;
+    let hits = 0;
+    let touchedFocused = false;
+    for (const r of targets) {
+      const rich = (r.text ?? []) as unknown[];
+      let remHits = 0;
+      const next = rich.map((seg) => {
+        if (typeof seg !== 'string') return seg;
+        if (remHits > 0 && !flags.includes('g')) return seg; // first match per bullet
+        return seg.replace(re, (...args) => {
+          remHits++;
+          const whole = args[0] as string;
+          const groups = args.slice(1, -2) as (string | undefined)[];
+          // manual $-expansion ($$, $&, $1..$9) — can't re-run `re` inside
+          // its own replace callback (lastIndex corruption on /g)
+          return replacement
+            .replace(/\$\$/g, '\u0000')
+            .replace(/\$&/g, whole)
+            .replace(/\$(\d)/g, (_, d: string) => groups[+d - 1] ?? '')
+            .replace(/\u0000/g, '$');
+        });
+      });
+      if (remHits > 0) {
+        await r.setText(next as RichTextInterface);
+        bullets++;
+        hits += remHits;
+        if (r._id === focusedId) touchedFocused = true;
+      }
+    }
+    if (touchedFocused) this.invalidateModel();
+    await app.toast(
+      hits === 0
+        ? `Pattern not found: /${pat}/`
+        : `${hits} substitution${hits > 1 ? 's' : ''} on ${bullets} bullet${bullets > 1 ? 's' : ''}`
+    );
   }
 
   /** Floating widget id of the open :help window, if any. */
@@ -852,6 +993,168 @@ export class VimAdapter {
   }
 
   /** `:e <name>` — search for a Rem by name and open the best match. */
+  // ------------------------------------------------- wildmenu (command-line suggestions)
+
+  /** The Ex command catalog the wildmenu offers. */
+  private static readonly EX_COMMANDS: { verb: string; hint: string; arg?: 'rem' | 'none' }[] = [
+    { verb: 'e', hint: 'open document (search)', arg: 'rem' },
+    { verb: 's/', hint: 'substitute  s/pat/repl/[gia]', arg: 'none' },
+    { verb: 'vs', hint: 'vertical split [document]', arg: 'rem' },
+    { verb: 'sp', hint: 'horizontal split [document]', arg: 'rem' },
+    { verb: 'q', hint: 'close pane', arg: 'none' },
+    { verb: 'only', hint: 'single pane', arg: 'none' },
+    { verb: 'help', hint: 'cheat sheet', arg: 'none' },
+    { verb: 'w', hint: 'save (RemNote autosaves)', arg: 'none' },
+  ];
+
+  /**
+   * Recompute the wildmenu for the current command line. Verb position →
+   * filter the catalog; argument position of a rem-taking verb (:e, :vs,
+   * :sp) → live document search. Async: a seq counter drops stale results.
+   */
+  private async updateSuggestions() {
+    const seq = ++this.suggestSeq;
+    this.suggestIdx = -1;
+    const line = this.state.commandLine;
+    const argMatch = line.match(/^(\S+)\s+(.*)$/);
+
+    if (!argMatch) {
+      // verb position (also covers the empty line = full catalog)
+      this.suggestions = VimAdapter.EX_COMMANDS.filter((c) =>
+        c.verb.startsWith(line.toLowerCase())
+      ).map((c) => ({
+        label: `:${c.verb}  — ${c.hint}`,
+        complete: c.arg === 'rem' ? `${c.verb} ` : c.verb,
+      }));
+      await this.render();
+      return;
+    }
+
+    const verb = argMatch[1].toLowerCase();
+    const arg = argMatch[2];
+    const takesRem = ['e', 'edit', 'find', 'f', 'vs', 'vsp', 'vsplit', 'sp', 'split'].includes(verb);
+    if (!takesRem || arg.length === 0) {
+      this.suggestions = [];
+      await this.render();
+      return;
+    }
+    try {
+      const results = await this.plugin.search.search([arg]);
+      if (seq !== this.suggestSeq) return; // a newer keystroke superseded us
+      this.suggestions = (results ?? []).slice(0, 5).map((r) => {
+        const name = (r.text ?? [])
+          .map((x) => (typeof x === 'string' ? x : ((x as { text?: string }).text ?? '')))
+          .join('');
+        return { label: name, complete: `${argMatch[1]} ${name}` };
+      });
+    } catch {
+      this.suggestions = [];
+    }
+    if (seq === this.suggestSeq) await this.render();
+  }
+
+  /** Tab: apply the next wildmenu entry to the command line (cycles). */
+  private cycleCompletion() {
+    if (this.state.mode !== 'command' || this.suggestions.length === 0) return;
+    this.suggestIdx = (this.suggestIdx + 1) % this.suggestions.length;
+    this.state = {
+      ...this.state,
+      commandLine: this.suggestions[this.suggestIdx].complete,
+    };
+  }
+
+  // ------------------------------------------------- panes (:vs/:sp/:q/:on)
+
+  /** Raw host RPC — the pane layout has no typed SDK surface (probed live). */
+  private winCall(method: string, args: unknown): Promise<unknown> {
+    return (
+      this.plugin.window as unknown as {
+        call: (m: string, a?: unknown) => Promise<unknown>;
+      }
+    ).call(method, args);
+  }
+
+  /** Current panes as an ordered doc-id list plus the focused index. */
+  private async paneLeaves() {
+    const win = this.plugin.window;
+    const ids = await win.getOpenPaneIds();
+    const focused = await win.getFocusedPaneId();
+    const docs: (string | undefined)[] = [];
+    for (const id of ids) docs.push(await win.getOpenPaneRemId(id));
+    return { docs, focusedIdx: Math.max(0, ids.indexOf(focused)) };
+  }
+
+  /** Right-fold a flat leaf list into equal splits along one direction. */
+  private buildPaneTree(leaves: string[], direction: 'row' | 'column'): PaneNode {
+    let node: PaneNode = leaves[leaves.length - 1];
+    for (let i = leaves.length - 2; i >= 0; i--) {
+      node = {
+        direction,
+        first: leaves[i],
+        second: node,
+        splitPercentage: 100 / (leaves.length - i),
+      };
+    }
+    return node;
+  }
+
+  /**
+   * `:vsplit`/`:split` — duplicate the focused pane (or open `arg`, found via
+   * search, beside it). There is no layout GETTER, so an existing multi-pane
+   * arrangement is rebuilt flat along `direction` — nesting/ratios of a
+   * hand-arranged 3+ pane layout are not preserved.
+   */
+  private async splitPane(direction: 'row' | 'column', arg: string) {
+    const app = this.plugin.app;
+    const { docs, focusedIdx } = await this.paneLeaves();
+    const curDoc = docs[focusedIdx];
+    if (!curDoc || docs.some((d) => !d)) {
+      await app.toast('Cannot split: a pane has no document');
+      return;
+    }
+    let newDoc = curDoc;
+    if (arg) {
+      const results = await this.plugin.search.search([arg]);
+      const top = results?.[0];
+      if (!top) {
+        await app.toast(`No Rem matching "${arg}"`);
+        return;
+      }
+      newDoc = top._id;
+    }
+    const leaves = [
+      ...(docs as string[]).slice(0, focusedIdx + 1),
+      newDoc,
+      ...(docs as string[]).slice(focusedIdx + 1),
+    ];
+    await this.winCall('setRemWindowTree', { tree: this.buildPaneTree(leaves, direction) });
+  }
+
+  /** `:q` with a split open — close the focused pane. */
+  private async closePane() {
+    const { docs, focusedIdx } = await this.paneLeaves();
+    if (docs.length < 2 || docs.some((d) => !d)) {
+      await this.plugin.app.toast('Nothing to quit (RemNote autosaves)');
+      return;
+    }
+    const leaves = (docs as string[]).filter((_, i) => i !== focusedIdx);
+    await this.winCall('setRemWindowTree', {
+      tree: leaves.length === 1 ? leaves[0] : this.buildPaneTree(leaves, 'row'),
+    });
+  }
+
+  /** `:only` — collapse the layout to just the focused pane. */
+  private async onlyPane() {
+    const { docs, focusedIdx } = await this.paneLeaves();
+    const keep = docs[focusedIdx];
+    if (!keep) {
+      await this.plugin.app.toast('Cannot resolve the focused pane');
+      return;
+    }
+    if (docs.length < 2) return;
+    await this.winCall('setRemWindowTree', { tree: keep });
+  }
+
   private async openByName(name: string) {
     try {
       const results = await this.plugin.search.search([name]);
@@ -1211,13 +1514,22 @@ export class VimAdapter {
   private async render() {
     const mode = this.state.mode;
     const color = MODE_COLORS[mode];
-    // In command mode show the `:` line being typed; otherwise the mode name.
-    const label =
-      mode === 'command'
-        ? `:${this.state.commandLine.replace(/["\\]/g, '')}`
-        : `-- ${MODE_LABELS[mode]} --`;
+    const esc = (s: string) => s.replace(/["\\]/g, '');
+    // In command mode show the `:` line being typed (vim-style '<,'> marker
+    // when a selection is the implicit range) with the wildmenu stacked
+    // above; otherwise the mode name.
+    let label: string;
+    if (mode === 'command') {
+      const range = this.vSelIds.length ? "'<,'>" : '';
+      const menu = this.suggestions
+        .map((s, i) => `${i === this.suggestIdx ? '▸' : ' '} ${esc(s.label)}`)
+        .join('\\A');
+      label = `${menu ? menu + '\\A' : ''}:${range}${esc(this.state.commandLine)}`;
+    } else {
+      label = `-- ${MODE_LABELS[mode]} --`;
+    }
     // The visual-line tint survives into command mode so the user can see
-    // what :todo/:done will act on while typing the command.
+    // what a range command (:s over the selection) will act on while typing.
     const selCss =
       (mode === 'visual-line' || mode === 'command') && this.vSelIds.length
         ? this.vSelIds
@@ -1248,6 +1560,7 @@ export class VimAdapter {
         font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
         letter-spacing: 0.08em; background: ${color}; color: #fff;
         pointer-events: none; opacity: 0.9;
+        white-space: pre; text-align: left;
       }
       body::before {
         content: "vim ${mode} rx=${this.dbgCount} done=${this.dbgDone} k=${this.dbgLast} ${this.dbgV} ${this.dbgClip}";

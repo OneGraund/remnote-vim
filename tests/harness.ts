@@ -33,6 +33,8 @@ export class Harness {
   /** Jumplist rows (adapter keeps rem ids; rows model the same thing here). */
   jumps: number[] = [];
   jumpPos = 0;
+  /** focusPane directions emitted (the adapter cycles real panes). */
+  paneMoves: number[] = [];
   state: VimState;
 
   private undoStack: DocState[] = [];
@@ -148,6 +150,10 @@ export class Harness {
   private exec(a: Action) {
     switch (a.t) {
       case 'setCaret':
+        this.caret = clamp(a.at, 0, this.line.length);
+        this.sel = null;
+        break;
+      case 'collapseSelection':
         this.caret = clamp(a.at, 0, this.line.length);
         this.sel = null;
         break;
@@ -337,6 +343,7 @@ export class Harness {
         break;
       }
       case 'focusPane':
+        this.paneMoves.push(a.dir);
         break;
       case 'undo': {
         const s = this.undoStack.pop();
@@ -392,6 +399,8 @@ function tokenize(seq: string): string[] {
           'c-d': 'C-d',
           'c-u': 'C-u',
           'c-w': 'C-w',
+          'c-h': 'C-h',
+          'c-l': 'C-l',
           'c-o': 'C-o',
           'c-i': 'C-i',
         };

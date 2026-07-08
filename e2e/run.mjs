@@ -18,6 +18,7 @@
 // Prereqs: RemNote running with --remote-debugging-port (default 9222), the
 // dev plugin loaded+enabled, and today's Daily Document open.
 import { chromium } from 'playwright-core';
+import { resolveDailyDocId, dailyPaneScope } from './docid.mjs';
 
 const PORT = process.env.REMNOTE_CDP_PORT ?? '9222';
 const SETTLE = Number(process.env.VIM_E2E_SETTLE ?? 900);
@@ -103,20 +104,25 @@ async function readOwn() {
 // DOM query is scoped to bullets whose Rem-ancestor chain reaches the daily
 // document (its id is the URL slug suffix), so we can never touch anything
 // outside today's note.
-// Rem ids are alphanumeric; the URL slug is <Title-words>-<id>, so take the
-// text after the LAST hyphen.
-const DOC_ID = await page.evaluate(() => location.href.match(/-([A-Za-z0-9]+)$/)?.[1] ?? null);
+// Rem ids are alphanumeric; docid.mjs handles both the single-pane URL form
+// (<Title-words>-<id>) and the split-pane form ((Slug-idA)_(Slug-idB)_50).
+const DOC_ID = await resolveDailyDocId(page);
 if (!DOC_ID) {
   console.error("✗ Could not determine the daily document id from the URL. Open today's Daily Document.");
   process.exit(2);
 }
+// With a split open, queries must stay inside the daily doc's own pane —
+// a zoomed daily-child in the other pane renders the same rems twice, and
+// clicking the wrong copy moves keyboard focus out of the daily pane.
+// Resolved per query (the layout can change mid-run).
+const paneScope = () => dailyPaneScope(page, DOC_ID);
 console.log('· scoped to daily doc', DOC_ID);
 
 // Returns [{text, x, y}] for every bullet inside the daily doc, in DOM order.
 async function scopedBullets() {
-  return page.evaluate((docId) => {
+  return page.evaluate(({ docId, pane }) => {
     const out = [];
-    for (const c of document.querySelectorAll('.EditorContainer')) {
+    for (const c of document.querySelectorAll(pane + '.EditorContainer')) {
       const id = c.closest('[data-rem-id]')?.getAttribute('data-rem-id');
       if (!id) continue;
       let cur = window.Rem(window.CURRENT_KNOWLEDGE_BASE).findOne(id);
@@ -131,7 +137,7 @@ async function scopedBullets() {
       out.push({ text: c.textContent.replace(/ |​/g, ' ').trim(), x: r.x + Math.min(25, r.width / 2 + 5), y: r.y + r.height / 2 });
     }
     return out;
-  }, DOC_ID);
+  }, { docId: DOC_ID, pane: await paneScope() });
 }
 
 async function focusScratch() {
@@ -239,9 +245,9 @@ await resetEmpty();
 // ---- part 2: bullets & visual-line (multi-bullet) ------------------------
 
 const allBullets = async () => (await scopedBullets()).map((b) => b.text);
-const remIdByText = (t) =>
-  page.evaluate(({ txt, docId }) => {
-    for (const c of document.querySelectorAll('.EditorContainer')) {
+const remIdByText = async (t) =>
+  page.evaluate(({ txt, docId, pane }) => {
+    for (const c of document.querySelectorAll(pane + '.EditorContainer')) {
       if (c.textContent.trim() !== txt) continue;
       const id = c.closest('[data-rem-id]')?.getAttribute('data-rem-id');
       if (!id) continue;
@@ -252,7 +258,7 @@ const remIdByText = (t) =>
       }
     }
     return null;
-  }, { txt: t, docId: DOC_ID });
+  }, { txt: t, docId: DOC_ID, pane: await paneScope() });
 const parentOfText = async (t) => {
   const id = await remIdByText(t);
   if (!id) return null;
