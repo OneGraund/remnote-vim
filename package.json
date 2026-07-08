@@ -2,7 +2,24 @@
   "private": true,
   "name": "remnote-vim",
   "version": "0.1.0",
+  "description": "Modal, vim-style editing for the RemNote desktop app, as a RemNote plugin.",
+  "author": "onegraund",
   "license": "MIT",
+  "homepage": "https://github.com/onegraund/remnote-vim#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onegraund/remnote-vim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/onegraund/remnote-vim/issues"
+  },
+  "keywords": [
+    "remnote",
+    "remnote-plugin",
+    "vim",
+    "modal-editing",
+    "keyboard"
+  ],
   "scripts": {
     "check-types": "tsc",
     "dev": "NODE_ENV=development webpack-dev-server --color --no-open",

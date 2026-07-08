@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npm run check-types
+
+      - name: Unit tests (engine)
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+# Note: the live end-to-end suite (npm run e2e) drives a running RemNote
+# desktop app over CDP and cannot run in headless CI — it is a local-only
+# check. See DEVELOPMENT.md §7.
