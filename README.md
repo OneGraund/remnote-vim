@@ -10,6 +10,9 @@ objects, marks, dot-repeat, an Ex command line, and native clipboard
 integration — driven entirely by the keyboard, right inside your RemNote notes.
 
 <!-- TODO: drop a short demo GIF here, e.g. docs/demo.gif -->
+https://github.com/user-attachments/assets/8df3a3c7-82cf-4f7d-a025-0d31f13e1263
+
+
 
 > **Desktop only.** RemNote's plugin sandbox can't steal keys reliably on
 > mobile, so the plugin declares `enableOnMobile: false`.
