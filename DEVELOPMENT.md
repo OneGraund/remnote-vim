@@ -15,6 +15,93 @@ commit 122d18e).
 
 ## 0. Work log / current state
 
+### 2026-07-08 — HANDOFF to next account: command-line rework shipped (needs live verify) + bughunt results
+
+Read this first. A batch of command-line/Ex work is **committed and
+unit-green (119/119, tsc clean)** but several pieces are **NOT yet
+live-verified** — that's the main open work. Plus a live bughunt cleared the
+user's reported issues (most already fixed; the one "bug" that remained is a
+test-harness artifact, not a real defect). Live e2e RemNote is running on CDP
+9223 with three clean scratch bullets (`alpha`/`beta`/`gamma`) in the daily
+doc; `ydotool` daemon is up (`systemctl --user start ydotool`).
+
+**Commit `81134a8`** — "Pane nav via C-h/C-l; release '/'; drop todo verbs;
+add :s/:vsplit/:split/:q/:only; wildmenu". What it contains and its
+verification state:
+
+| Feature | Code | Unit | Live-verified? |
+|---|---|---|---|
+| `/` released → RemNote's own slash menu opens; `;` is the only vim cmdline key | ✅ | ✅ | ✅ (slash menu screenshot) |
+| `:todo`/`:done`/`:untodo` removed (slash menu covers them) | ✅ | ✅ | n/a (removal) |
+| `Ctrl-H`/`Ctrl-L` pane nav (C-w kept for other hosts) | ✅ | ✅ | ✅ (real ydotool click + split) |
+| Escape from charwise visual COLLAPSES the native selection (`collapseSelection` action) | ✅ | ✅ | ✅ (this session) |
+| visual `e` advances past current word end | ✅ | ✅ | ✅ (earlier session) |
+| **`:s/pat/repl/[gia]`** substitute over rich text | ✅ | ⚠ engine-only | ❌ **needs live verify** |
+| **`:vsplit`/`:split`/`:q`/`:only`** via `window.setRemWindowTree` host RPC | ✅ | n/a | ❌ **needs live verify** (RPC shape probed live, Ex verbs not driven end-to-end) |
+| **Wildmenu** (Tab-cycled suggestions; `:e`/`:vs`/`:sp` live doc search) | ✅ | ⚠ `/`-typeable only | ❌ **needs live verify** |
+
+**Next account's job (in priority order):**
+
+1. **Live-verify `:s`** — `;s/alpha/ALPHA/<cr>` on a focused bullet; then
+   flags: `g` (all matches in a bullet), `i` (case), `a` (whole document,
+   vim's untypeable `%`), and a visual-line selection as the implicit range
+   (`v j` then `;s/e/E/g`). The `'<,'>` marker should show in the badge while
+   a selection is live. Impl: `substitute()` in `adapter.ts`; only PLAIN
+   string rich-text segments are touched (references left intact). Watch for
+   `$`-expansion bugs in the replacement (manual `$1`/`$&` handling, NUL
+   sentinel for `$$`).
+2. **Live-verify panes** — `;vs<cr>` (duplicate focused pane side by side),
+   `;sp<cr>` (stacked), `;vs some-doc<cr>` (search + open beside), `;q<cr>`
+   (close focused pane), `;only<cr>`. Impl: `splitPane`/`closePane`/`onlyPane`
+   in `adapter.ts` build a react-mosaic tree and call `winCall`. Caveat
+   documented in code: no layout GETTER exists, so a hand-arranged 3+ pane
+   layout is rebuilt flat.
+3. **Live-verify the wildmenu** — type `;` then `e ` and a partial doc name;
+   suggestions render stacked above the mode badge (they're CSS `content` on
+   `body::after`, `\A`-separated, `white-space:pre`); Tab cycles/applies them.
+   `EX_COMMANDS` is the static verb catalog; arg-position search is async with
+   a seq-guard. Verify stale async results don't clobber a newer keystroke.
+4. Decide whether `stress.mjs` should drop its `c-o`/`c-i` presses (they are
+   CDP no-ops — see finding below) or gain a real-input variant.
+
+**Bughunt results (live, this session — against the user's VIM-doc report):**
+
+- ✅ **Multiline visual-line yank → OS clipboard WORKS** (user said it didn't).
+  `v j y` put `- alpha\n- beta` on the real clipboard (read via `wl-paste` —
+  Wayland session; XWayland app clipboard bridges through). Was fixed by the
+  evening `nativeClipboardRems` work; now confirmed. Single-line `yy` → `- alpha`.
+- ✅ **Escape from visual no longer strands the selection** (user's complaint).
+  After `0 v l l <esc>` the native selection is collapsed and mode is normal.
+- ✅ **`v gg` / `v ge`** select the whole doc line-wise (trail:3/units:3) — user
+  said these "didn't work"; they do now (was likely the stale-build era).
+- ✅ **`Ctrl-O` / `Ctrl-I` jumplist WORKS with real input.** This looked like a
+  bug under CDP (rx never incremented, focus never moved) but that is a
+  **CDP delivery limitation, not a defect**: with real ydotool keys, `gg`→`ge`
+  then physical Ctrl+O returned focus alpha←gamma and Ctrl+I went forward
+  again (badge `k=ctrl+o`/`k=ctrl+i`, rx incremented). The jumplist logic in
+  `adapter.ts` (`case 'jump'`, `recordJump`) is fine. If the USER still sees it
+  fail, suspect an OS/Electron binding on Ctrl+O (common "open file"
+  accelerator) in *their* environment — worth asking.
+- `$` end-of-line stays unreachable by construction (shift-blind; use `gl`) —
+  known, documented in §9/§0.5, not re-litigated.
+
+**e2e harness gotchas discovered (cost real time — heed these):**
+
+- **The daily-template banner** ("Set Up Template / Not Now") shifts bullet
+  positions as it renders/dismisses, so precomputed click coords go stale and
+  the click lands on empty space → focus never attaches (looks like clicks are
+  "broken"). Dismiss the banner first, then click via a **locator** that
+  resolves position at click-time, not a cached rect.
+- **`selectRem` probing leaves the editor stuck** in `.in-selected-portal`
+  with hit-testing falling through to `<html>` (even after pointer-events is
+  forced to `auto`). Once in this state CDP clicks are dead; the reliable
+  reset is a full app relaunch (`pkill` the 9223 process + `./e2e/launch.sh`).
+- **Ctrl-chord delivery splits three ways** (all verified this session):
+  `C-d`/`C-u`/`C-r` reach the steal via CDP; `C-o`/`C-i` do NOT via CDP but DO
+  via real hardware; `C-w` reaches neither (Electron eats it even from a real
+  keyboard). ⇒ `run.mjs`/`stress.mjs` cannot cover `C-o`/`C-i`/`C-w`; use
+  `e2e/real-input.mjs` (ydotool) for those.
+
 ### 2026-07-07 late night — Ctrl-W was dead at real keyboards; C-h/C-l pane nav + real-input e2e
 
 User report: Ctrl-W → h/l did nothing in real usage although the e2e passed.
@@ -324,9 +411,15 @@ Working live in the real app (RemNote 1.26.30, SDK 0.0.46):
   desktop app — Electron eats it; see §9).
 - **Scrolling** — `Ctrl-D`/`Ctrl-U` (caret page-moves; view follows).
   `Ctrl-E`/`Ctrl-Y` deliberately unbound — no view-scroll API exists.
-- **Command line** — `:help` cheat sheet; `:todo`/`:done`/`:untodo` act on
-  the visual selection or focused bullet; `:e <name>` search+open (a jump);
-  `:w`/`:q` acknowledged (autosave).
+- **Command line** — opened with `;` only (`/` now belongs to RemNote's own
+  slash-command menu; `:todo`/`:done`/`:untodo` were removed). `:help` cheat
+  sheet; `:e <name>` search+open (a jump); `:w` acknowledged (autosave).
+  **The following are committed (81134a8) but NOT yet live-verified — see the
+  2026-07-08 handoff in §0:** `:s/pat/repl/[gia]` substitute (visual selection
+  or focused bullet as range, `a` = whole doc); `:vsplit`/`:split`/`:q`/`:only`
+  pane management (via the undocumented `window.setRemWindowTree` RPC); and a
+  Tab-cycled **wildmenu** of command suggestions with live `:e`/`:vs`/`:sp`
+  document search.
 - **New bullets** — `o`/`go`(=`O`) always create a *sibling* (never a child).
 - **Cursor visibility** — cursorline row tint + colored left caret bar
   outside insert mode.
@@ -809,6 +902,26 @@ against RemNote 1.26.30):
   real keyboard. Any new modifier-chord binding must be verified with
   `e2e/real-input.mjs` (§7) before trusting it. Pane nav therefore lives on
   Ctrl-H/Ctrl-L (the `C-w` chord stays bound for hosts that deliver it).
+- **Ctrl-chord delivery splits THREE ways** (all verified 2026-07-08) — this
+  is subtler than the C-w blocker and bit a bughunt hard:
+  - `C-d` / `C-u` / `C-r` reach RemNote's key steal via **CDP** (so
+    run.mjs/stress.mjs can drive them).
+  - `C-o` / `C-i` do **NOT** reach the steal via CDP (rx never increments) but
+    **DO** via real hardware (ydotool). So the jumplist looks broken under CDP
+    and works at a real keyboard — do not "fix" a jumplist bug you only saw in
+    a CDP test; reproduce it with `e2e/real-input.mjs` first.
+  - `C-w` reaches neither (previous bullet).
+  Net: `run.mjs`/`stress.mjs` cannot cover `C-o`/`C-i`/`C-w`; only
+  `real-input.mjs` can.
+- **`elementFromPoint` can fall through to `<html>` even with pointer-events
+  fine**, making CDP `mouse.click` focus nothing. Two distinct causes seen:
+  (1) the **daily-template banner** rendering/dismissing shifts bullet Y
+  positions, so a precomputed click coord lands in empty space — dismiss the
+  banner and click via a Playwright **locator** (position resolved at
+  click-time); (2) leftover **`selectRem` state** stuck as
+  `.in-selected-portal` on `.rn-editor-container` deadens hit-testing until a
+  full app relaunch. If clicks mysteriously stop focusing, relaunch the app
+  rather than fighting it.
 - **RemNote can boot with `pointer-events-none` stuck on
   `.rn-editor-container`** (suppress-mouse-while-typing state that never
   clears when no real pointer enters the window — an e2e/CDP hazard more
